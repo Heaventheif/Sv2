@@ -32,12 +32,27 @@ async function saveCtx(id, messages) {
   } catch (_) {}
 }
 
+// ─── تحميل الصورة من URL وتحويلها base64 (مثل gptx) ─────────
+async function downloadImageAsBase64(url) {
+  try {
+    const response = await axios.get(url, {
+      responseType: "arraybuffer",
+      timeout: 15000,
+      headers: { "User-Agent": "Mozilla/5.0" },
+    });
+    const contentType = response.headers["content-type"] || "image/jpeg";
+    const base64 = Buffer.from(response.data).toString("base64");
+    return { base64, contentType };
+  } catch (e) {
+    console.warn("[GROQ] فشل تحميل الصورة:", e.message?.substring(0, 60));
+    return null;
+  }
+}
+
 // ─── كشف المرفق من event (FCA) ───────────────────────────────
-// FCA يضع الصور في عدة أماكن حسب طريقة الإرسال
 function detectAttachment(event) {
-  // جمع كل مصادر المرفقات المحتملة
   const sources = [
-    ...(event.attachments         || []),
+    ...(event.attachments               || []),
     ...(event.messageReply?.attachments || []),
   ];
 
@@ -45,39 +60,22 @@ function detectAttachment(event) {
     if (!att) continue;
     const type = (att.type || att.attachmentType || "").toLowerCase();
 
-    // ─── صورة ───────────────────────────────────────────────
-    if (
-      type === "photo"   ||
-      type === "image"   ||
-      type === "sticker" ||
-      type === "animated_image" ||
-      type === "share"   // بعض الصور تأتي كـ share
-    ) {
+    if (["photo","image","sticker","animated_image","share"].includes(type)) {
       const url =
-        att.largePreviewUrl ||
-        att.previewUrl      ||
-        att.largePreviewUri ||   // FCA v4
-        att.previewUri      ||
-        att.uri             ||
-        att.url             ||
-        att.thumbnailUrl    ||
+        att.largePreviewUrl || att.previewUrl ||
+        att.largePreviewUri || att.previewUri ||
+        att.uri || att.url  || att.thumbnailUrl ||
         att.image?.uri;
       if (url) return { kind: "image", url };
     }
-
-    // ─── صوت ────────────────────────────────────────────────
     if (type === "audio" || type === "voice_message") {
       const url = att.url || att.audioUrl || att.uri;
       if (url) return { kind: "audio", url };
     }
-
-    // ─── فيديو ──────────────────────────────────────────────
     if (type === "video" || type === "video_inline") {
       const url = att.url || att.uri || att.previewUrl;
       if (url) return { kind: "video", url };
     }
-
-    // ─── ملف عام — نخمن من الامتداد ─────────────────────────
     if (type === "file" || type === "document") {
       const ext = (att.filename || att.name || "").split(".").pop().toLowerCase();
       const url = att.url || att.uri;
@@ -91,10 +89,8 @@ function detectAttachment(event) {
     }
   }
 
-  // ─── لا شيء وُجد — سجّل للـ debug ──────────────────────────
-  if (sources.length > 0) {
+  if (sources.length > 0)
     console.warn("[GROQ] attachment غير معروف:", JSON.stringify(sources[0]).substring(0, 200));
-  }
 
   return null;
 }
@@ -114,7 +110,6 @@ async function callHF(messages) {
 async function handle(api, event, prompt, registerReply) {
   const { threadID, messageID, senderID } = event;
 
-  // مسح الذاكرة
   if (["clear","مسح","reset"].includes(prompt.trim().toLowerCase())) {
     try { await Session.findByIdAndDelete(senderID); } catch (_) {}
     return api.sendMessage("🧹 تم مسح ذاكرة المحادثة.", threadID, null, messageID);
@@ -122,7 +117,6 @@ async function handle(api, event, prompt, registerReply) {
 
   const attachment = detectAttachment(event);
 
-  // لا نص ولا مرفق
   if (!prompt.trim() && !attachment) {
     return api.sendMessage(
       "❓ اكتب سؤالك أو أرسل صورة/صوت/فيديو!\n" +
@@ -133,17 +127,47 @@ async function handle(api, event, prompt, registerReply) {
   }
 
   // مؤشر انتظار
-  const waitMsg = attachment
-    ? `⏳ جاري تحليل ${attachment.kind === "image" ? "الصورة 🖼️" : attachment.kind === "audio" ? "الصوت 🎵" : "الفيديو 🎬"}...`
-    : "⏳ جاري المعالجة...";
-  api.sendMessage(waitMsg, threadID, null, messageID);
+  api.sendMessage(
+    attachment
+      ? `⏳ جاري تحليل ${attachment.kind === "image" ? "الصورة 🖼️" : attachment.kind === "audio" ? "الصوت 🎵" : "الفيديو 🎬"}...`
+      : "⏳ جاري المعالجة...",
+    threadID, null, messageID
+  );
 
   const ctx = await loadCtx(senderID);
-  const userMsg = {
-    role:    "user",
-    content: prompt.trim() || (attachment?.kind === "image" ? "وصف هذه الصورة" : attachment?.kind === "audio" ? "فرّغ هذا الصوت" : "حلل هذا الفيديو"),
-    ...(attachment ? { attachment } : {}),
-  };
+
+  // ─── تحضير رسالة المستخدم ────────────────────────────────
+  let userMsg;
+
+  if (attachment?.kind === "image") {
+    // ✅ نحمّل الصورة هنا في Render (مثل gptx) ونرسل base64 لـ HF
+    const imgData = await downloadImageAsBase64(attachment.url);
+    if (imgData) {
+      userMsg = {
+        role: "user",
+        content: prompt.trim() || "وصف هذه الصورة",
+        attachment: {
+          kind:        "image",
+          base64:      imgData.base64,
+          contentType: imgData.contentType,
+        },
+      };
+    } else {
+      // فشل التحميل — نرسل نصاً فقط
+      userMsg = { role: "user", content: prompt.trim() || "وصف هذه الصورة" };
+      api.sendMessage("⚠️ تعذّر تحميل الصورة، سأجيب على النص فقط.", threadID, null, messageID);
+    }
+  } else if (attachment) {
+    // صوت أو فيديو — نرسل الـ URL لـ HF يتولاه
+    userMsg = {
+      role: "user",
+      content: prompt.trim() || (attachment.kind === "audio" ? "فرّغ هذا الصوت" : "حلل هذا الفيديو"),
+      attachment: { kind: attachment.kind, url: attachment.url },
+    };
+  } else {
+    userMsg = { role: "user", content: prompt.trim() };
+  }
+
   const messages = [...ctx, userMsg];
 
   let reply;
@@ -174,7 +198,7 @@ module.exports = {
   config: {
     name: "groq",
     aliases: ["llma32", "ai2"],
-    version: "9.1.0",
+    version: "9.2.0",
     author: "Sunken",
     countDown: 3,
     role: 0,
