@@ -32,53 +32,71 @@ async function saveCtx(id, messages) {
   } catch (_) {}
 }
 
-// ─── كشف المرفق من event ─────────────────────────────────────
+// ─── كشف المرفق من event (FCA) ───────────────────────────────
+// FCA يضع الصور في عدة أماكن حسب طريقة الإرسال
 function detectAttachment(event) {
-  const att = event.attachments?.[0];
-  if (!att) return null;
+  // جمع كل مصادر المرفقات المحتملة
+  const sources = [
+    ...(event.attachments         || []),
+    ...(event.messageReply?.attachments || []),
+  ];
 
-  const type = att.type?.toLowerCase() || "";
+  for (const att of sources) {
+    if (!att) continue;
+    const type = (att.type || att.attachmentType || "").toLowerCase();
 
-  if (["photo", "sticker", "animated_image"].includes(type)) {
-    return {
-      kind: "image",
-      url:  att.largePreviewUrl || att.previewUrl || att.url || att.thumbnailUrl,
-    };
+    // ─── صورة ───────────────────────────────────────────────
+    if (
+      type === "photo"   ||
+      type === "image"   ||
+      type === "sticker" ||
+      type === "animated_image" ||
+      type === "share"   // بعض الصور تأتي كـ share
+    ) {
+      const url =
+        att.largePreviewUrl ||
+        att.previewUrl      ||
+        att.largePreviewUri ||   // FCA v4
+        att.previewUri      ||
+        att.uri             ||
+        att.url             ||
+        att.thumbnailUrl    ||
+        att.image?.uri;
+      if (url) return { kind: "image", url };
+    }
+
+    // ─── صوت ────────────────────────────────────────────────
+    if (type === "audio" || type === "voice_message") {
+      const url = att.url || att.audioUrl || att.uri;
+      if (url) return { kind: "audio", url };
+    }
+
+    // ─── فيديو ──────────────────────────────────────────────
+    if (type === "video" || type === "video_inline") {
+      const url = att.url || att.uri || att.previewUrl;
+      if (url) return { kind: "video", url };
+    }
+
+    // ─── ملف عام — نخمن من الامتداد ─────────────────────────
+    if (type === "file" || type === "document") {
+      const ext = (att.filename || att.name || "").split(".").pop().toLowerCase();
+      const url = att.url || att.uri;
+      if (!url) continue;
+      if (["jpg","jpeg","png","gif","webp","bmp"].includes(ext))
+        return { kind: "image", url };
+      if (["mp3","m4a","ogg","wav","flac","aac"].includes(ext))
+        return { kind: "audio", url };
+      if (["mp4","mov","avi","mkv","webm"].includes(ext))
+        return { kind: "video", url };
+    }
   }
-  if (type === "audio") {
-    return { kind: "audio", url: att.url };
+
+  // ─── لا شيء وُجد — سجّل للـ debug ──────────────────────────
+  if (sources.length > 0) {
+    console.warn("[GROQ] attachment غير معروف:", JSON.stringify(sources[0]).substring(0, 200));
   }
-  if (type === "video") {
-    return { kind: "video", url: att.url || att.previewUrl };
-  }
-  if (type === "file") {
-    const ext = (att.filename || "").split(".").pop().toLowerCase();
-    if (["jpg","jpeg","png","gif","webp"].includes(ext))
-      return { kind: "image", url: att.url };
-    if (["mp3","m4a","ogg","wav","flac"].includes(ext))
-      return { kind: "audio", url: att.url };
-    if (["mp4","mov","avi","mkv"].includes(ext))
-      return { kind: "video", url: att.url };
-  }
+
   return null;
-}
-
-// ─── بناء رسالة المستخدم (نص + مرفق اختياري) ────────────────
-function buildUserMessage(prompt, attachment) {
-  // بدون مرفق — نص عادي
-  if (!attachment) {
-    return { role: "user", content: prompt || "وصف ما تراه" };
-  }
-
-  // مع مرفق — نرسل URL للـ HF ليحمّله
-  return {
-    role: "user",
-    content: prompt || "وصف ما تراه",
-    attachment: {
-      kind: attachment.kind,  // image | audio | video
-      url:  attachment.url,
-    },
-  };
 }
 
 // ─── استدعاء HF ──────────────────────────────────────────────
@@ -121,7 +139,11 @@ async function handle(api, event, prompt, registerReply) {
   api.sendMessage(waitMsg, threadID, null, messageID);
 
   const ctx = await loadCtx(senderID);
-  const userMsg = buildUserMessage(prompt.trim(), attachment);
+  const userMsg = {
+    role:    "user",
+    content: prompt.trim() || (attachment?.kind === "image" ? "وصف هذه الصورة" : attachment?.kind === "audio" ? "فرّغ هذا الصوت" : "حلل هذا الفيديو"),
+    ...(attachment ? { attachment } : {}),
+  };
   const messages = [...ctx, userMsg];
 
   let reply;
@@ -129,10 +151,7 @@ async function handle(api, event, prompt, registerReply) {
     reply = await callHF(messages);
   } catch (e) {
     console.error("[GROQ→HF]", e.response?.status, e.message?.substring(0, 80));
-    return api.sendMessage(
-      "❌ الخادم غير متاح حالياً، حاول لاحقاً.",
-      threadID, null, messageID
-    );
+    return api.sendMessage("❌ الخادم غير متاح حالياً، حاول لاحقاً.", threadID, null, messageID);
   }
 
   api.sendMessage(reply, threadID, (err, info) => {
@@ -144,11 +163,9 @@ async function handle(api, event, prompt, registerReply) {
     }
   }, messageID);
 
-  // حفظ السياق — نحفظ نص فقط (بدون attachment لتوفير المساحة)
-  const userMsgForCtx = { role: "user", content: userMsg.content };
   await saveCtx(senderID, [
     ...ctx,
-    userMsgForCtx,
+    { role: "user",      content: userMsg.content },
     { role: "assistant", content: reply },
   ]);
 }
@@ -157,17 +174,17 @@ module.exports = {
   config: {
     name: "groq",
     aliases: ["llma32", "ai2"],
-    version: "9.0.0",
+    version: "9.1.0",
     author: "Sunken",
     countDown: 3,
     role: 0,
     shortDescription: { ar: "محادثة ذكية + Vision — Llama 4 Scout" },
     category: "ذكاء اصطناعي",
-    guide: { ar: "{pn}ai2 [سؤالك]\n{pn}ai2 [صورة/صوت/فيديو] [وصف اختياري]\n{pn}ai2 مسح" },
+    guide: { ar: "{pn}ai2 [سؤالك]\n{pn}ai2 + صورة/صوت/فيديو\n{pn}ai2 مسح" },
   },
 
   onStart: async ({ api, event, args, message }) => {
-    const prompt = args.join(" ").trim() || event.messageReply?.body || "";
+    const prompt = args.join(" ").trim() || "";
     await handle(api, event, prompt, message?.registerReply);
   },
 
