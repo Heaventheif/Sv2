@@ -1,26 +1,34 @@
 "use strict";
-const axios = require("axios");
-const fs    = require("fs-extra");
-const path  = require("path");
+const axios    = require("axios");
+const mongoose = require("mongoose");
 
-const HF_BASE = process.env.HF_SPACE_URL || "https://YOUR-USERNAME-YOUR-SPACE.hf.space";
+const HF_BASE = process.env.HF_SPACE_URL || "https://Solvant-s.hf.space";
 
-const sessionsDir = path.join(__dirname, "..", "cache", "groq_sessions");
-fs.ensureDirSync(sessionsDir);
-const sessionPath = (id) => path.join(sessionsDir, `${id}.json`);
+// ─── Schema للجلسات ──────────────────────────────────────────
+const sessionSchema = new mongoose.Schema({
+  _id:      String,
+  messages: { type: Array, default: [] },
+  updatedAt: { type: Date, default: Date.now },
+});
+const Session = mongoose.models.GroqSession || mongoose.model("GroqSession", sessionSchema);
 
 async function loadCtx(id) {
   try {
-    if (await fs.pathExists(sessionPath(id))) {
-      const data = await fs.readJson(sessionPath(id));
-      return Array.isArray(data) ? data.slice(-10) : [];
-    }
-  } catch (_) {}
-  return [];
+    if (!global.db) return [];
+    const doc = await Session.findById(id).lean();
+    return doc?.messages?.slice(-10) || [];
+  } catch (_) { return []; }
 }
 
-async function saveCtx(id, ctx) {
-  await fs.writeJson(sessionPath(id), ctx.slice(-10), { spaces: 0 }).catch(() => {});
+async function saveCtx(id, messages) {
+  try {
+    if (!global.db) return;
+    await Session.findByIdAndUpdate(
+      id,
+      { messages: messages.slice(-10), updatedAt: new Date() },
+      { upsert: true }
+    );
+  } catch (_) {}
 }
 
 async function callHF(messages) {
@@ -30,14 +38,14 @@ async function callHF(messages) {
     { timeout: 30000, headers: { "Content-Type": "application/json" } }
   );
   if (!data.reply) throw new Error("استجابة فارغة");
-  return { reply: data.reply, provider: data.provider };
+  return data.reply;
 }
 
-async function handle(api, event, prompt) {
+async function handle(api, event, prompt, registerReply) {
   const { threadID, messageID, senderID } = event;
 
   if (prompt.trim().toLowerCase() === "clear" || prompt.trim() === "مسح") {
-    try { await fs.unlink(sessionPath(senderID)); } catch (_) {}
+    try { await Session.findByIdAndDelete(senderID); } catch (_) {}
     return api.sendMessage("🧹 تم مسح ذاكرة المحادثة.", threadID, null, messageID);
   }
 
@@ -50,24 +58,31 @@ async function handle(api, event, prompt) {
 
   const ctx = await loadCtx(senderID);
   const messages = [
-    ...ctx.map(m => ({ role: m.role === "user" ? "user" : "assistant", content: m.content })),
+    ...ctx,
     { role: "user", content: prompt.trim() },
   ];
 
-  let reply, provider;
+  let reply;
   try {
-    ({ reply, provider } = await callHF(messages));
+    reply = await callHF(messages);
   } catch (e) {
-    console.error("[GROQ→HF] فشل:", e.response?.status, e.message?.substring(0, 60));
+    console.error("[GROQ→HF]", e.response?.status, e.message?.substring(0, 60));
     return api.sendMessage("❌ الخادم غير متاح حالياً، حاول لاحقاً.", threadID, null, messageID);
   }
 
-  api.sendMessage(reply, threadID, null, messageID);
+  api.sendMessage(reply, threadID, (err, info) => {
+    if (err || !info) return;
+    if (registerReply) {
+      registerReply(info.messageID, { author: senderID }, async ({ api, event }) => {
+        await handle(api, event, event.body?.trim() || "", registerReply);
+      });
+    }
+  }, messageID);
 
   await saveCtx(senderID, [
     ...ctx,
-    { role: "user",  content: prompt.trim() },
-    { role: "model", content: reply },
+    { role: "user",      content: prompt.trim() },
+    { role: "assistant", content: reply },
   ]);
 }
 
@@ -75,19 +90,21 @@ module.exports = {
   config: {
     name: "groq",
     aliases: ["llma32", "ai2"],
-    version: "7.0.0",
+    version: "8.0.0",
     author: "Sunken",
     countDown: 3,
     role: 0,
-    shortDescription: { ar: "محادثة ذكية عبر HF Space" },
+    shortDescription: { ar: "محادثة ذكية — جلسات MongoDB" },
     category: "ذكاء اصطناعي",
     guide: { ar: "{pn}ai2 [سؤالك]\n{pn}ai2 مسح" },
   },
-  onStart: async ({ api, event, args }) => {
+
+  onStart: async ({ api, event, args, message }) => {
     const prompt = args.join(" ").trim() || event.messageReply?.body || "";
-    await handle(api, event, prompt);
+    await handle(api, event, prompt, message?.registerReply);
   },
-  onReply: async ({ api, event }) => {
-    await handle(api, event, event.body?.trim() || "");
+
+  onReply: async ({ api, event, message }) => {
+    await handle(api, event, event.body?.trim() || "", message?.registerReply);
   },
 };
