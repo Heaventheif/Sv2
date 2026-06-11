@@ -3,7 +3,7 @@ const axios = require("axios");
 const fs    = require("fs-extra");
 const path  = require("path");
 
-const MODEL       = "llama-3.3-70b-versatile";
+const MODEL       = "meta-llama/llama-3.3-70b-instruct:free";
 const sessionsDir = path.join(__dirname, "..", "cache", "groq_sessions");
 fs.ensureDirSync(sessionsDir);
 
@@ -27,21 +27,21 @@ async function saveCtx(id, ctx) {
   await fs.writeJson(sessionPath(id), ctx.slice(-10), { spaces: 0 }).catch(() => {});
 }
 
-// ─── يقرأ المفتاح عند كل استدعاء (لا عند التحميل) ───────────
-async function callGroq(messages) {
-  const key = process.env.GROQ_API_KEY;
-  console.log(`[GROQ DEBUG] key=${key ? key.substring(0,8)+"..." : "MISSING"}`);
+async function callAI(messages) {
+  const key = process.env.OPENROUTER_API_KEY || process.env.GROQ_API_KEY;
+  if (!key) throw new Error("لا يوجد مفتاح API");
 
-  if (!key) throw new Error("GROQ_API_KEY غير موجود");
-
+  // OpenRouter (يعمل مع Render بدون حظر)
   const { data } = await axios.post(
-    "https://api.groq.com/openai/v1/chat/completions",
+    "https://openrouter.ai/api/v1/chat/completions",
     { model: MODEL, messages, temperature: 0.7, max_tokens: 1024 },
     {
-      timeout: 15000,
+      timeout: 20000,
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${key}`,
+        "HTTP-Referer": "https://render.com",
+        "X-Title": "Sunken Bot",
       },
     }
   );
@@ -74,12 +74,12 @@ async function handle(api, event, prompt) {
 
   let reply;
   try {
-    reply = await callGroq(messages);
+    reply = await callAI(messages);
   } catch (e) {
-    console.error("[GROQ ERROR]", e.response?.status, e.response?.data || e.message);
+    console.error("[AI2 ERROR]", e.response?.status, e.response?.data || e.message);
     let errMsg = "❌ حدث خطأ: ";
-    if (e.response?.status === 403)      errMsg += "🔑 المفتاح غير صالح أو محظور (403)";
-    else if (e.response?.status === 401) errMsg += "🔑 مفتاح API خاطئ (401)";
+    if (e.response?.status === 403)      errMsg += "🔑 المفتاح محظور (403) — تحقق من OPENROUTER_API_KEY";
+    else if (e.response?.status === 401) errMsg += "🔑 مفتاح خاطئ (401)";
     else if (e.response?.status === 429) errMsg += "⏳ تجاوزت الحد (429)";
     else if (e.code === "ECONNABORTED")  errMsg += "⏱️ انتهت مهلة الاتصال";
     else errMsg += e.message || "اتصال فاشل";
@@ -99,11 +99,11 @@ module.exports = {
   config: {
     name: "groq",
     aliases: ["llma32", "ai2"],
-    version: "4.1.0",
+    version: "5.0.0",
     author: "Sunken",
     countDown: 3,
     role: 0,
-    shortDescription: { ar: "محادثة مع Llama عبر Groq" },
+    shortDescription: { ar: "محادثة مع Llama عبر OpenRouter" },
     category: "ذكاء اصطناعي",
     guide: { ar: "{pn}ai2 [سؤالك]\n{pn}ai2 مسح" },
   },
