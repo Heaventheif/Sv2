@@ -1,297 +1,129 @@
-const axios = require("axios");
-const fs = require("fs-extra");
-const path = require("path");
+const axios = require('axios');
+const fs = require('fs-extra');
+const path = require('path');
 
-const GEMINI_KEYS = [
-  process.env.GEMINI_API_KEY,
-  process.env.GEMINI_API_KEY_2,
-  process.env.GEMINI_API_KEY_3,
-  process.env.GEMINI_API_KEY_4,
-].filter(k => k && k.length > 10);
-
-console.log(`[GEMINI] تم تحميل ${GEMINI_KEYS.length} مفتاح`);
-
+const GEMINI_KEYS = [process.env.GEMINI_API_KEY, process.env.GEMINI_API_KEY_2, process.env.GEMINI_API_KEY_3, process.env.GEMINI_API_KEY_4].filter(key => key && key.length > 10);
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+let currentKeyIndex = 0;
 
-let keyIndex = 0;
-const getNextKey = () => {
-  if (!GEMINI_KEYS.length) return null;
-  const k = GEMINI_KEYS[keyIndex];
-  keyIndex = (keyIndex + 1) % GEMINI_KEYS.length;
-  return k;
+function getNextGeminiKey() {
+  if (GEMINI_KEYS.length === 0) return null;
+  const key = GEMINI_KEYS[currentKeyIndex];
+  currentKeyIndex = (currentKeyIndex + 1) % GEMINI_KEYS.length;
+  return key;
+}
+
+const sessionsDir = path.join(__dirname, '..', 'cache', 'ai_sessions');
+fs.ensureDirSync(sessionsDir);
+const SYSTEM_INSTRUCTION = `أنت بوت مساعد ذكي على فيسبوك ماسنجر اسمك "Shadow Garden Bot". أجب بإيجاز باللغة العربية (أقل من 150 كلمة). كن ودوداً ومهذباً.`;
+
+// 🛡️ دالة تفاعل حصينة تمنع تعطل البوت تماماً
+const setReaction = (api, reaction, messageID, threadID) => {
+  try {
+    if (!messageID || !threadID) {
+      console.warn("[Reaction] تم تجاهل التفاعل: المعاملات مفقودة");
+      return;
+    }
+    api.setMessageReaction(String(reaction), String(messageID), () => {}, String(threadID));
+  } catch (e) {
+    // تجاهل الخطأ بصمت لمنع إبطاء البوت
+  }
 };
 
-const sessionsDir = path.join(__dirname, "..", "cache", "ai_sessions");
-fs.ensureDirSync(sessionsDir);
-
-const getSessionPath = (tid) => path.join(sessionsDir, `thread_${tid}.json`);
-
-async function loadSession(tid) {
-  try {
-    if (await fs.pathExists(getSessionPath(tid))) {
-      return await fs.readJson(getSessionPath(tid));
-    }
-  } catch (_) {}
-  return [];
-}
-
-async function saveSession(tid, ctx) {
-  try {
-    await fs.writeJson(getSessionPath(tid), ctx.slice(-10), { spaces: 0 });
-  } catch (_) {}
-}
-
-const SYSTEM_INSTRUCTION = `أنت بوت مساعد ذكي على فيسبوك ماسنجر اسمك "Sunken".
-- أجب بإيجاز باللغة العربية (أقل من 200 كلمة).
-- إذا أُرسلت لك صورة، حللها وصفها بدقة.
-- كن ودوداً ومهذباً ومفيداً.`;
-
-async function fetchAndConvertToBase64(url, fallbackMime = "image/jpeg") {
-  try {
-    const response = await axios.get(url, {
-      responseType: "arraybuffer",
-      timeout: 20000,
-      headers: { "User-Agent": "Mozilla/5.0" }
-    });
-    const base64 = Buffer.from(response.data).toString("base64");
-    const mimeType = response.headers["content-type"] || fallbackMime;
-    return { base64, mimeType };
-  } catch (err) {
-    throw new Error(`فشل التحميل: ${err.message}`);
-  }
-}
-
-async function buildParts(text, attachments) {
-  const parts = [];
-  if (text && text.trim()) parts.push({ text: text.trim() });
-
-  for (const att of attachments) {
-    const type = (att.type || "").toLowerCase();
-    const mediaUrl = att.largePreviewUrl || att.url || att.previewUrl;
-    if (!mediaUrl) continue;
-
-    if (type === "photo" || type === "image" || (att.name && att.name.match(/\.(jpg|jpeg|png|gif|webp)$/i))) {
-      try {
-        const { base64, mimeType } = await fetchAndConvertToBase64(mediaUrl, "image/jpeg");
-        parts.push({
-          inlineData: {
-            mimeType: mimeType,
-            data: base64
-          }
-        });
-      } catch (err) {
-        console.error("[GEMINI] فشل تحميل الصورة:", err.message);
-        parts.push({ text: `[تعذر تحميل الصورة]` });
-      }
-    } 
-    else if (type === "audio") {
-      try {
-        const { base64, mimeType } = await fetchAndConvertToBase64(mediaUrl, "audio/mpeg");
-        parts.push({
-          inlineData: {
-            mimeType: mimeType,
-            data: base64
-          }
-        });
-      } catch (err) {
-        console.error("[GEMINI] فشل تحميل الصوت:", err.message);
-        parts.push({ text: "[ملف صوتي]" });
-      }
-    }
-    else if (type === "video") {
-      parts.push({ text: "[فيديو مرفق]" });
-    }
-    else {
-      parts.push({ text: `[مرفق: ${type || "ملف"}]` });
-    }
-  }
-
-  return parts.length > 0 ? parts : [{ text: "." }];
-}
-
 async function callGemini(contents, apiKey) {
-  const payload = {
-    systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-    contents: contents,
-    generationConfig: {
-      temperature: 0.7,
-      maxOutputTokens: 2048,
-      topP: 0.95
-    }
-  };
-
-  const response = await axios.post(
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
-    payload,
-    {
-      timeout: 30000,
-      headers: {
-        "Content-Type": "application/json",
-        "X-goog-api-key": apiKey
-      }
-    }
-  );
-
-  const candidate = response.data.candidates?.[0];
-  if (!candidate) throw new Error("لا يوجد مرشح في الرد");
-  const text = candidate.content?.parts?.[0]?.text;
-  if (!text) throw new Error("استجابة فارغة من Gemini");
-  return text;
-}
-
-async function callGeminiWithRetry(contents) {
-  if (!GEMINI_KEYS.length) throw new Error("لا توجد مفاتيح Gemini متاحة");
-
-  const triedKeys = [];
-  for (let attempt = 0; attempt < GEMINI_KEYS.length * 2; attempt++) {
-    const key = getNextKey();
-    if (!key) break;
-    if (triedKeys.includes(key)) continue;
-    triedKeys.push(key);
-
-    try {
-      const reply = await callGemini(contents, key);
-      if (reply) return reply;
-    } catch (err) {
-      const status = err.response?.status;
-      const errorMsg = err.response?.data?.error?.message || err.message;
-      console.error(`[GEMINI] مفتاح (${triedKeys.length}) - status ${status}: ${errorMsg}`);
-
-      if (status === 429) {
-        console.warn(`[GEMINI] مفتاح ${triedKeys.length} تجاوز الحد → تأخير 3 ثوان`);
-        await new Promise(r => setTimeout(r, 3000));
-        continue;
-      } else if (status === 400 || status === 403) {
-        console.error(`[GEMINI] مفتاح ${triedKeys.length} فشل بسبب: ${errorMsg}`);
-        continue;
-      } else {
-        console.error(`[GEMINI] خطأ غير متوقع: ${errorMsg}`);
-        continue;
-      }
-    }
-  }
-  throw new Error("جميع مفاتيح Gemini فشلت (تحقق من صلاحية المفاتيح أو تفعيل الفوترة)");
+  const { data } = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent`, {
+    systemInstruction: { parts: [{ text: SYSTEM_INSTRUCTION }] }, contents, generationConfig: { temperature: 0.7, maxOutputTokens: 2048 }
+  }, { timeout: 15000, headers: { 'Content-Type': 'application/json', 'X-goog-api-key': apiKey } });
+  return data.candidates?.[0]?.content?.parts?.[0]?.text;
 }
 
 async function callGroq(contents) {
-  if (!GROQ_API_KEY) throw new Error("لا يوجد مفتاح Groq");
-
-  const messages = [
-    { role: "system", content: SYSTEM_INSTRUCTION }
-  ];
-
-  for (const c of contents) {
-    const role = c.role === "model" ? "assistant" : "user";
-    let contentText = "";
-    for (const part of c.parts) {
-      if (part.text) contentText += part.text + " ";
-      else if (part.inlineData) contentText += "[صورة مرفقة] ";
-      else if (part.fileData) contentText += "[مرفق] ";
-    }
-    messages.push({ role, content: contentText.trim() || "[مرفق]" });
-  }
-
-  const response = await axios.post(
-    "https://api.groq.com/openai/v1/chat/completions",
-    {
-      model: "llama-3.3-70b-versatile",
-      messages: messages,
-      temperature: 0.7,
-      max_tokens: 2048,
-      top_p: 0.9
-    },
-    {
-      timeout: 20000,
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${GROQ_API_KEY}`
-      }
-    }
-  );
-
-  const reply = response.data.choices?.[0]?.message?.content;
-  if (!reply) throw new Error("استجابة فارغة من Groq");
-  return reply;
-}
-
-async function handleMessage(api, event, promptText, attachments) {
-  const { threadID, messageID, senderID } = event;
-
-  if (promptText && (promptText.toLowerCase() === "clear" || promptText === "مسح")) {
-    try { await fs.unlink(getSessionPath(threadID)); } catch (_) {}
-    return api.sendMessage("🧹 تم مسح ذاكرة المحادثة.", threadID, null, messageID);
-  }
-
-  if (!promptText.trim() && !attachments.length) {
-    return api.sendMessage(
-      "🤖 **Sunken AI**\n\n📝 أرسل سؤالك أو صورة مع الأمر\n💡 مثال: `.gemini ما هذه الصورة؟`",
-      threadID, null, messageID
-    );
-  }
-
-  let context = await loadSession(threadID);
-  const newParts = await buildParts(promptText, attachments);
-  const contents = [...context, { role: "user", parts: newParts }];
-
-  let reply = null;
-  try {
-    reply = await callGeminiWithRetry(contents);
-  } catch (geminiErr) {
-    console.error("[GEMINI] فشل كلي:", geminiErr.message);
-    if (GROQ_API_KEY) {
-      try {
-        reply = await callGroq(contents);
-      } catch (groqErr) {
-        console.error("[GROQ] فشل:", groqErr.message);
-        return api.sendMessage(`❌ فشل Gemini: ${geminiErr.message}\n❌ فشل Groq: ${groqErr.message}`, threadID, null, messageID);
-      }
-    } else {
-      return api.sendMessage(`❌ ${geminiErr.message}`, threadID, null, messageID);
-    }
-  }
-
-  if (!reply) return api.sendMessage("❌ لم أستطع توليد رد.", threadID, null, messageID);
-
-  api.sendMessage(reply, threadID, (err, info) => {
-    if (!err && info && global.GoatBot && global.GoatBot.onReply) {
-      global.GoatBot.onReply.set(info.messageID, {
-        commandName: "gemini",
-        messageID: info.messageID,
-        author: senderID,
-        threadID: threadID,
-      });
-    }
-  }, messageID);
-
-  await saveSession(threadID, [
-    ...context.slice(-8),
-    { role: "user", parts: [{ text: promptText || (attachments.length ? "[مرفق]" : ".") }] },
-    { role: "model", parts: [{ text: reply }] }
-  ]);
+  if (!GROQ_API_KEY) throw new Error("No Groq Key");
+  const messages = [{ role: "system", content: SYSTEM_INSTRUCTION }, ...contents.map(c => ({ role: c.role === 'model' ? 'assistant' : 'user', content: c.parts[0].text }))];
+  const { data } = await axios.post('https://api.groq.com/openai/v1/chat/completions', { model: "llama-3.3-70b-versatile", messages, temperature: 0.7, max_tokens: 2048 }, { timeout: 15000, headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${GROQ_API_KEY}` } });
+  return data.choices?.[0]?.message?.content;
 }
 
 module.exports = {
-  config: {
-    name: "gemini",
-    aliases: ["بوت", "ai", "gm", "جيميني"],
-    version: "3.4.0",
-    author: "Sunken",
-    countDown: 5,
-    role: 0,
-    shortDescription: { ar: "محادثة ذكية تدعم الصور" },
-    category: "ذكاء اصطناعي",
-    guide: { ar: ".gemini سؤالك\n.gemini مع صورة\n.gemini clear" }
+  config: { name: "gemini", aliases: ["بوت"], version: "2.3.0", author: "Auto-Fallback", countDown: 5, role: 0, shortDescription: { ar: "محادثة ذكية" }, category: "ذكاء اصطناعي", guide: { ar: "{pn}ai [سؤالك]" } },
+  onStart: async ({ api, event, args, message }) => {    const { threadID, messageID, senderID } = event;
+    let prompt = args.join(" ");
+    if (event.messageReply && !prompt) prompt = event.messageReply.body;
+    
+    if (prompt.toLowerCase() === "clear" || prompt === "مسح") {
+      const userSession = path.join(sessionsDir, `${senderID}.json`);
+      if (await fs.pathExists(userSession)) await fs.unlink(userSession);
+      return api.sendMessage("🧹 تم مسح ذاكرة المحادثة.", threadID, null, messageID);
+    }
+    if (!prompt) return api.sendMessage("اكتب سؤالك!", threadID, null, messageID);
+
+    setReaction(api, "⏳", messageID, threadID);
+    const userSession = path.join(sessionsDir, `${senderID}.json`);
+    let context = [];
+    try { if (await fs.pathExists(userSession)) context = await fs.readJson(userSession); } catch (e) {}
+    if (context.length > 4) context = context.slice(-4);
+    
+    const contents = context.map(m => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: m.content }] }));
+    contents.push({ role: 'user', parts: [{ text: prompt }] });
+    
+    let reply = null;
+    try {
+      const apiKey = getNextGeminiKey();
+      if (apiKey) reply = await callGemini(contents, apiKey); else throw new Error("No Keys");
+    } catch (err) {
+      if (GROQ_API_KEY) { try { reply = await callGroq(contents); } catch (e) { setReaction(api, "❌", messageID, threadID); return api.sendMessage("❌ تعذر الاتصال بالخوادم.", threadID, null, messageID); } }
+      else { setReaction(api, "❌", messageID, threadID); return api.sendMessage("❌ تم تجاوز الحد. جرب /ai2", threadID, null, messageID); }
+    }
+
+    if (!reply) { setReaction(api, "❌", messageID, threadID); return api.sendMessage("❌ استجابة فارغة.", threadID, null, messageID); }
+    
+    setReaction(api, "🟢", messageID, threadID);
+    api.sendMessage(reply, threadID, (err, info) => {
+      if (err) return console.error(err);
+      message.registerReply(info.messageID, { author: senderID }, module.exports.onReply);
+    }, messageID);
+
+    context.push({ role: 'user', content: prompt });
+    context.push({ role: 'model', content: reply });
+    fs.writeJson(userSession, context, { spaces: 0 }).catch(() => {});
   },
-  onStart: async ({ api, event, args }) => {
-    const text = args.join(" ").trim();
-    const attachments = event.attachments || [];
-    const replyAttachments = event.messageReply?.attachments || [];
-    const finalText = text || event.messageReply?.body || "";
-    await handleMessage(api, event, finalText, [...attachments, ...replyAttachments]);
-  },
-  onReply: async ({ api, event }) => {
-    const text = event.body?.trim() || "";
-    const attachments = event.attachments || [];
-    await handleMessage(api, event, text, attachments);
+  onReply: async ({ api, event, message, Reply }) => {
+    const { threadID, messageID, senderID, body } = event;
+    if (Reply.author !== senderID) return;
+    let prompt = body.trim();
+    
+    if (prompt.toLowerCase() === "clear" || prompt === "مسح") {
+      const userSession = path.join(sessionsDir, `${senderID}.json`);
+      if (await fs.pathExists(userSession)) await fs.unlink(userSession);
+      return api.sendMessage("🧹 تم مسح ذاكرة المحادثة.", threadID, null, messageID);    }
+
+    setReaction(api, "⏳", messageID, threadID);
+    const userSession = path.join(sessionsDir, `${senderID}.json`);
+    let context = [];
+    try { if (await fs.pathExists(userSession)) context = await fs.readJson(userSession); } catch (e) {}
+    
+    const contents = context.map(m => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: m.content }] }));
+    contents.push({ role: 'user', parts: [{ text: prompt }] });
+    
+    let reply = null;
+    try {
+      const apiKey = getNextGeminiKey();
+      if (apiKey) reply = await callGemini(contents, apiKey); else throw new Error("No Keys");
+    } catch (err) {
+      if (GROQ_API_KEY) { try { reply = await callGroq(contents); } catch (e) { setReaction(api, "❌", messageID, threadID); return api.sendMessage("❌ تعذر الاتصال.", threadID, null, messageID); } }
+      else { setReaction(api, "❌", messageID, threadID); return api.sendMessage("❌ تم تجاوز الحد.", threadID, null, messageID); }
+    }
+
+    if (!reply) { setReaction(api, "❌", messageID, threadID); return api.sendMessage("❌ استجابة فارغة.", threadID, null, messageID); }
+
+    setReaction(api, "🟢", messageID, threadID);
+    api.sendMessage(reply, threadID, (err, info) => {
+      if (err) return console.error(err);
+      message.registerReply(info.messageID, { author: senderID }, module.exports.onReply);
+    }, messageID);
+
+    context.push({ role: 'user', content: prompt });
+    context.push({ role: 'model', content: reply });
+    fs.writeJson(userSession, context, { spaces: 0 }).catch(() => {});
   }
 };
