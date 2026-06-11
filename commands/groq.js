@@ -3,7 +3,6 @@ const axios = require("axios");
 const fs    = require("fs-extra");
 const path  = require("path");
 
-const MODEL       = "meta-llama/llama-3.3-70b-instruct:free";
 const sessionsDir = path.join(__dirname, "..", "cache", "groq_sessions");
 fs.ensureDirSync(sessionsDir);
 
@@ -27,27 +26,62 @@ async function saveCtx(id, ctx) {
   await fs.writeJson(sessionPath(id), ctx.slice(-10), { spaces: 0 }).catch(() => {});
 }
 
-async function callAI(messages) {
-  const key = process.env.OPENROUTER_API_KEY || process.env.GROQ_API_KEY;
-  if (!key) throw new Error("لا يوجد مفتاح API");
-
-  // OpenRouter (يعمل مع Render بدون حظر)
-  const { data } = await axios.post(
-    "https://openrouter.ai/api/v1/chat/completions",
-    { model: MODEL, messages, temperature: 0.7, max_tokens: 1024 },
-    {
-      timeout: 20000,
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${key}`,
-        "HTTP-Referer": "https://render.com",
-        "X-Title": "Sunken Bot",
-      },
+// ─── المزودون بالترتيب ────────────────────────────────────────
+const PROVIDERS = [
+  {
+    name: "HuggingFace",
+    call: async (messages) => {
+      const key = process.env.HF_TOKEN;
+      if (!key) throw new Error("NO_HF_KEY");
+      const { data } = await axios.post(
+        "https://api-inference.huggingface.co/models/meta-llama/Llama-3.3-70B-Instruct/v1/chat/completions",
+        { model: "meta-llama/Llama-3.3-70B-Instruct", messages, max_tokens: 1024, temperature: 0.7 },
+        { timeout: 25000, headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" } }
+      );
+      return data.choices?.[0]?.message?.content;
     }
-  );
-  const reply = data.choices?.[0]?.message?.content;
-  if (!reply) throw new Error("استجابة فارغة");
-  return reply;
+  },
+  {
+    name: "Groq",
+    call: async (messages) => {
+      const key = process.env.GROQ_API_KEY;
+      if (!key) throw new Error("NO_GROQ_KEY");
+      const { data } = await axios.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        { model: "llama-3.3-70b-versatile", messages, max_tokens: 1024, temperature: 0.7 },
+        { timeout: 20000, headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json", "User-Agent": "Mozilla/5.0" } }
+      );
+      return data.choices?.[0]?.message?.content;
+    }
+  },
+  {
+    name: "OpenRouter",
+    call: async (messages) => {
+      const key = process.env.OPENROUTER_API_KEY;
+      if (!key) throw new Error("NO_OR_KEY");
+      const { data } = await axios.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        { model: "meta-llama/llama-3.3-70b-instruct:free", messages, max_tokens: 1024, temperature: 0.7 },
+        { timeout: 20000, headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json", "HTTP-Referer": "https://render.com" } }
+      );
+      return data.choices?.[0]?.message?.content;
+    }
+  },
+];
+
+async function callAI(messages) {
+  for (const provider of PROVIDERS) {
+    try {
+      const reply = await provider.call(messages);
+      if (reply) {
+        console.log(`[AI2] ✅ ${provider.name}`);
+        return reply;
+      }
+    } catch (e) {
+      console.warn(`[AI2] ⚠️ ${provider.name} فشل:`, e.response?.status || e.message?.substring(0, 40));
+    }
+  }
+  throw new Error("كل المزودين فشلوا");
 }
 
 async function handle(api, event, prompt) {
@@ -76,14 +110,7 @@ async function handle(api, event, prompt) {
   try {
     reply = await callAI(messages);
   } catch (e) {
-    console.error("[AI2 ERROR]", e.response?.status, e.response?.data || e.message);
-    let errMsg = "❌ حدث خطأ: ";
-    if (e.response?.status === 403)      errMsg += "🔑 المفتاح محظور (403) — تحقق من OPENROUTER_API_KEY";
-    else if (e.response?.status === 401) errMsg += "🔑 مفتاح خاطئ (401)";
-    else if (e.response?.status === 429) errMsg += "⏳ تجاوزت الحد (429)";
-    else if (e.code === "ECONNABORTED")  errMsg += "⏱️ انتهت مهلة الاتصال";
-    else errMsg += e.message || "اتصال فاشل";
-    return api.sendMessage(errMsg, threadID, null, messageID);
+    return api.sendMessage("❌ جميع الخوادم غير متاحة حالياً، حاول لاحقاً.", threadID, null, messageID);
   }
 
   api.sendMessage(reply, threadID, null, messageID);
@@ -99,20 +126,18 @@ module.exports = {
   config: {
     name: "groq",
     aliases: ["llma32", "ai2"],
-    version: "5.0.0",
+    version: "6.0.0",
     author: "Sunken",
     countDown: 3,
     role: 0,
-    shortDescription: { ar: "محادثة مع Llama عبر OpenRouter" },
+    shortDescription: { ar: "محادثة ذكية — HF + Groq + OpenRouter" },
     category: "ذكاء اصطناعي",
     guide: { ar: "{pn}ai2 [سؤالك]\n{pn}ai2 مسح" },
   },
-
   onStart: async ({ api, event, args }) => {
     const prompt = args.join(" ").trim() || event.messageReply?.body || "";
     await handle(api, event, prompt);
   },
-
   onReply: async ({ api, event }) => {
     await handle(api, event, event.body?.trim() || "");
   },
