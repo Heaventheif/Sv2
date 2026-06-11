@@ -1,313 +1,236 @@
-const axios = require('axios');
-const fs = require('fs-extra');
-const path = require('path');
+const axios = require("axios");
+const fs = require("fs-extra");
+const path = require("path");
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const sessionsDir = path.join(__dirname, '..', 'cache', 'ai2_sessions');
+if (!GROQ_API_KEY) console.error("[GROQ] ⚠️ GROQ_API_KEY غير موجود في .env");
+
+const sessionsDir = path.join(__dirname, "..", "cache", "groq_sessions");
 fs.ensureDirSync(sessionsDir);
 
-// استخدم نموذج يدعم الرؤية إذا كان متاحاً، وإلا استخدم النصي
+// نموذج يدعم الصور (vision)
 const VISION_MODEL = "llama-3.2-11b-vision-preview";
+// نموذج احتياطي نصي
 const TEXT_MODEL = "llama-3.3-70b-versatile";
-let USE_VISION = true; // حاول استخدام الرؤية أولاً
 
-const SYSTEM_INSTRUCTION = `أنت بوت مساعد ذكي على فيسبوك ماسنجر اسمك "Sunken". أجب دائماً باللغة العربية الفصحى البسيطة، اجعل ردودك مختصرة (أقل من 200 كلمة)، لا تذكر أنك نموذج ذكاء اصطناعي، كن ودوداً ومهذباً. إذا أرسلت لك صورة، حللها وصفها بدقة.`;
+const SYSTEM_INSTRUCTION = `أنت بوت مساعد ذكي على فيسبوك ماسنجر اسمك "Sunken". أجب دائماً باللغة العربية الفصحى البسيطة، اجعل ردودك مختصرة (أقل من 200 كلمة)، لا تذكر أنك نموذج ذكاء اصطناعي، كن ودوداً ومهذباً.`;
 
 const groqClient = axios.create({
-  baseURL: 'https://api.groq.com/openai/v1',
+  baseURL: "https://api.groq.com/openai/v1",
   timeout: 20000,
   headers: {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${GROQ_API_KEY}`
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${GROQ_API_KEY}`
   }
 });
 
-// دالة آمنة لتعيين التفاعل
-const setReaction = (api, reaction, messageID, threadID) => {
-  try {
-    if (!reaction || !messageID || !threadID) return;
-    if (String(messageID) === "undefined" || String(threadID) === "undefined") return;
-    api.setMessageReaction(reaction, messageID, (err) => {
-      if (err) console.error("[GROQ] فشل تعيين التفاعل:", err.message);
-    }, true);
-  } catch (e) {}
-};
-
-// تحميل ملف (صورة) وتحويله إلى Base64
-async function fetchImageAsBase64(url) {
+// تحويل الصورة إلى Base64 URL
+async function imageToDataUrl(url) {
   try {
     const response = await axios.get(url, {
-      responseType: 'arraybuffer',
+      responseType: "arraybuffer",
       timeout: 15000,
-      headers: { 'User-Agent': 'Mozilla/5.0' }
+      headers: { "User-Agent": "Mozilla/5.0" }
     });
-    const base64 = Buffer.from(response.data).toString('base64');
-    const mimeType = response.headers['content-type'] || 'image/jpeg';
-    return { base64, mimeType };
+    const base64 = Buffer.from(response.data).toString("base64");
+    const mime = response.headers["content-type"] || "image/jpeg";
+    return `data:${mime};base64,${base64}`;
   } catch (err) {
     throw new Error(`فشل تحميل الصورة: ${err.message}`);
   }
 }
 
-// بناء محتوى الرسالة مع دعم الصور
-async function buildGroqMessages(context, userPrompt, attachments) {
+async function buildGroqMessages(prompt, attachments, history) {
   const messages = [{ role: "system", content: SYSTEM_INSTRUCTION }];
   
-  // إضافة السياق السابق
-  for (const msg of context) {
-    messages.push({ role: msg.role, content: msg.content });
+  // إضافة التاريخ
+  for (const h of history) {
+    messages.push({
+      role: h.role === "user" ? "user" : "assistant",
+      content: h.content
+    });
   }
-  
-  // بناء محتوى المستخدم الحالي
-  let userContent = [];
-  
-  // إضافة النص إن وجد
-  if (userPrompt && userPrompt.trim()) {
-    userContent.push({ type: "text", text: userPrompt.trim() });
-  }
-  
-  // إضافة الصور المرفقة
+
+  // بناء محتوى المستخدم (نص + صور)
+  let userContent = prompt || "";
+  const imageUrls = [];
+
   for (const att of attachments) {
     const type = (att.type || "").toLowerCase();
     const imgUrl = att.largePreviewUrl || att.url || att.previewUrl;
-    if ((type === "photo" || type === "image" || (att.name && att.name.match(/\.(jpg|jpeg|png|gif|webp)$/i))) && imgUrl) {
-      try {
-        const { base64, mimeType } = await fetchImageAsBase64(imgUrl);
-        userContent.push({
-          type: "image_url",
-          image_url: {
-            url: `data:${mimeType};base64,${base64}`
-          }
-        });
-      } catch (err) {
-        console.error("[GROQ] فشل تحميل الصورة:", err.message);
-        userContent.push({ type: "text", text: `[صورة لم يتم تحميلها: ${err.message}]` });
-      }
-    } else if (type === "audio") {
-      userContent.push({ type: "text", text: "[ملف صوتي مرفق]" });
-    } else if (type === "video") {
-      userContent.push({ type: "text", text: "[فيديو مرفق]" });
-    } else if (att.url) {
-      userContent.push({ type: "text", text: `[مرفق: ${type || "ملف"}]` });
+    if ((type === "photo" || type === "image") && imgUrl) {
+      imageUrls.push(imgUrl);
     }
   }
-  
-  if (userContent.length === 0) {
-    userContent.push({ type: "text", text: "." });
+
+  // إذا توجد صور، استخدم النموذج البصري
+  if (imageUrls.length > 0) {
+    // تحويل الصور إلى Base64 مسبقاً (مطلوب للنموذج البصري)
+    const contentParts = [];
+    if (userContent) contentParts.push({ type: "text", text: userContent });
+    
+    for (const url of imageUrls) {
+      try {
+        const dataUrl = await imageToDataUrl(url);
+        contentParts.push({
+          type: "image_url",
+          image_url: { url: dataUrl }
+        });
+      } catch (err) {
+        contentParts.push({ type: "text", text: `[فشل تحميل صورة: ${err.message}]` });
+      }
+    }
+    messages.push({ role: "user", content: contentParts });
+    return { messages, useVision: true };
+  } else {
+    // نص فقط
+    messages.push({ role: "user", content: userContent || "." });
+    return { messages, useVision: false };
   }
-  
-  messages.push({ role: "user", content: userContent });
-  return messages;
 }
 
-// استدعاء Groq API مع إعادة المحاولة التلقائية
-async function callGroqWithRetry(messages, retries = 2) {
-  let lastError = null;
-  let currentModel = USE_VISION ? VISION_MODEL : TEXT_MODEL;
-  
-  for (let attempt = 0; attempt < retries; attempt++) {
+async function callGroqWithFallback(messages, useVision) {
+  // أولاً: جرب النموذج البصري إذا كان مطلوباً
+  if (useVision) {
     try {
-      const payload = {
-        model: currentModel,
+      const response = await groqClient.post("/chat/completions", {
+        model: VISION_MODEL,
         messages: messages,
         temperature: 0.7,
         max_tokens: 2048,
-        top_p: 0.9
-      };
-      
-      const response = await groqClient.post('/chat/completions', payload);
+        top_p: 0.9,
+        stream: false
+      });
       const reply = response.data.choices?.[0]?.message?.content;
       if (reply) return reply;
-      throw new Error("استجابة فارغة");
     } catch (err) {
-      lastError = err;
       const status = err.response?.status;
       const errorMsg = err.response?.data?.error?.message || err.message;
-      
-      if (status === 429) {
-        console.warn("[GROQ] تجاوز الحد، انتظر 3 ثوان...");
-        await new Promise(r => setTimeout(r, 3000));
-        continue;
-      } else if (status === 400 && errorMsg.includes("vision") && USE_VISION) {
-        // النموذج البصري غير متاح، ننتقل إلى النصي
-        console.warn("[GROQ] النموذج البصري فشل، ننتقل إلى النموذج النصي");
-        USE_VISION = false;
-        currentModel = TEXT_MODEL;
-        continue;
-      } else {
-        console.error(`[GROQ] خطأ (${status}):`, errorMsg);
-        if (attempt === retries - 1) throw err;
-        await new Promise(r => setTimeout(r, 1000));
+      console.error(`[GROQ] فشل النموذج البصري (${status}): ${errorMsg}`);
+      if (status === 403) {
+        throw new Error("مفتاح Groq غير صالح أو محظور (403)");
       }
+      // إذا كان الخطأ بسبب عدم دعم الصور، نجرب النصي
+      if (errorMsg.includes("vision") || errorMsg.includes("image")) {
+        console.warn("[GROQ] النموذج البصري لا يعمل، جرب النصي بدون صور");
+        // نزيل الصور ونرسل النص فقط
+        const textOnlyMessages = messages.map(m => {
+          if (m.role === "user" && Array.isArray(m.content)) {
+            const textPart = m.content.find(p => p.type === "text");
+            return { ...m, content: textPart?.text || "." };
+          }
+          return m;
+        });
+        const response = await groqClient.post("/chat/completions", {
+          model: TEXT_MODEL,
+          messages: textOnlyMessages,
+          temperature: 0.7,
+          max_tokens: 2048,
+          top_p: 0.9
+        });
+        const reply = response.data.choices?.[0]?.message?.content;
+        if (reply) return reply;
+        throw new Error("لا رد من النموذج النصي");
+      }
+      throw err;
     }
+  } else {
+    // استخدام النموذج النصي مباشرة
+    const response = await groqClient.post("/chat/completions", {
+      model: TEXT_MODEL,
+      messages: messages,
+      temperature: 0.7,
+      max_tokens: 2048,
+      top_p: 0.9
+    });
+    const reply = response.data.choices?.[0]?.message?.content;
+    if (!reply) throw new Error("استجابة فارغة");
+    return reply;
   }
-  throw lastError || new Error("فشلت جميع محاولات Groq");
+}
+
+async function handleMessage(api, event, promptText, attachments) {
+  const { threadID, messageID, senderID } = event;
+
+  if (promptText && (promptText.toLowerCase() === "clear" || promptText === "مسح")) {
+    const sessionPath = path.join(sessionsDir, `${senderID}.json`);
+    try { await fs.unlink(sessionPath); } catch (_) {}
+    return api.sendMessage("🧹 تم مسح ذاكرة المحادثة.", threadID, null, messageID);
+  }
+
+  if (!promptText.trim() && !attachments.length) {
+    return api.sendMessage("🤖 **Groq AI**\nأرسل سؤالك أو صورة.\nمثال: `.groq ما هذه الصورة؟`", threadID, null, messageID);
+  }
+
+  if (!GROQ_API_KEY) {
+    return api.sendMessage("❌ مفتاح GROQ_API_KEY غير موجود في البيئة.", threadID, null, messageID);
+  }
+
+  // تحميل سياق المستخدم
+  const sessionPath = path.join(sessionsDir, `${senderID}.json`);
+  let history = [];
+  try {
+    if (await fs.pathExists(sessionPath)) history = await fs.readJson(sessionPath);
+  } catch (_) {}
+  if (history.length > 20) history = history.slice(-20);
+
+  const { messages, useVision } = await buildGroqMessages(promptText, attachments, history);
+
+  try {
+    const reply = await callGroqWithFallback(messages, useVision);
+    
+    // إرسال الرد
+    api.sendMessage(reply, threadID, (err, info) => {
+      if (!err && info && global.GoatBot && global.GoatBot.onReply) {
+        global.GoatBot.onReply.set(info.messageID, {
+          commandName: "groq",
+          messageID: info.messageID,
+          author: senderID,
+          threadID: threadID
+        });
+      }
+    }, messageID);
+
+    // حفظ التاريخ (بصيغة نصية فقط لتوفير المساحة)
+    const userText = promptText || (attachments.length ? "[صورة]" : ".");
+    history.push({ role: "user", content: userText });
+    history.push({ role: "assistant", content: reply });
+    await fs.writeJson(sessionPath, history.slice(-20), { spaces: 0 });
+  } catch (err) {
+    const status = err.response?.status;
+    const errorMsg = err.response?.data?.error?.message || err.message;
+    console.error("[GROQ] خطأ:", status, errorMsg);
+    let userMsg = "❌ حدث خطأ: ";
+    if (status === 403) userMsg += "مفتاح Groq غير صالح أو محظور. تأكد من صحة GROQ_API_KEY.";
+    else if (status === 429) userMsg += "تم تجاوز حد الاستخدام، انتظر قليلاً.";
+    else if (err.code === "ECONNABORTED") userMsg += "انتهت مهلة الاتصال.";
+    else userMsg += errorMsg;
+    api.sendMessage(userMsg, threadID, null, messageID);
+  }
 }
 
 module.exports = {
   config: {
     name: "groq",
-    aliases: ["llama", "ai2", "ذكاء"],
-    version: "3.2.0",
+    aliases: ["llama", "ai2", "جروك"],
+    version: "3.5.0",
     author: "Sunken",
     countDown: 3,
     role: 0,
     shortDescription: { ar: "محادثة مع Llama (يدعم الصور)" },
     category: "ذكاء اصطناعي",
-    guide: {
-      ar: "📌 `.groq سؤالك`\n📌 `.groq` مع صورة مرفقة\n📌 `.groq clear` لمسح الذاكرة"
-    }
+    guide: { ar: ".groq سؤالك\n.groq مع صورة\n.groq clear" }
   },
-  
-  onStart: async ({ api, event, args, message }) => {
-    const { threadID, messageID, senderID } = event;
-    let prompt = args.join(" ").trim();
-    
-    // إذا كان رداً على رسالة وليس هناك نص، خذ نص الرسالة المقتبسة
-    if (event.messageReply && !prompt) {
-      prompt = event.messageReply.body || "";
-    }
-    
+  onStart: async ({ api, event, args }) => {
+    const text = args.join(" ").trim();
     const attachments = event.attachments || [];
     const replyAttachments = event.messageReply?.attachments || [];
-    const allAttachments = [...attachments, ...replyAttachments];
-    
-    // أمر مسح الذاكرة
-    if (prompt.toLowerCase() === "clear" || prompt === "مسح") {
-      const userSession = path.join(sessionsDir, `${senderID}.json`);
-      if (await fs.pathExists(userSession)) await fs.unlink(userSession);
-      return api.sendMessage("🧹 تم مسح ذاكرة المحادثة الخاصة بك.", threadID, null, messageID);
-    }
-    
-    if (!prompt && allAttachments.length === 0) {
-      return api.sendMessage(
-        "🤖 **Groq AI (Llama)**\n\n📝 أرسل سؤالك أو صورة مع الأمر\n💡 مثال: `.groq ما محتوى هذه الصورة؟`\n🖼️ يمكنك إرفاق صورة وسأقوم بتحليلها.",
-        threadID, null, messageID
-      );
-    }
-    
-    if (!GROQ_API_KEY) {
-      return api.sendMessage("❌ مفتاح GROQ_API_KEY غير موجود في البيئة.", threadID, null, messageID);
-    }
-    
-    setReaction(api, "⏳", messageID, threadID);
-    
-    // تحميل السياق
-    const userSession = path.join(sessionsDir, `${senderID}.json`);
-    let context = [];
-    try {
-      if (await fs.pathExists(userSession)) {
-        context = await fs.readJson(userSession);
-        if (context.length > 12) context = context.slice(-12);
-      }
-    } catch (e) { context = []; }
-    
-    try {
-      // بناء الرسائل
-      const messages = await buildGroqMessages(context, prompt, allAttachments);
-      
-      // استدعاء API
-      const reply = await callGroqWithRetry(messages);
-      
-      if (!reply) throw new Error("استجابة فارغة");
-      
-      setReaction(api, "✅", messageID, threadID);
-      
-      // إرسال الرد
-      api.sendMessage(reply, threadID, async (err, info) => {
-        if (err) {
-          console.error("[GROQ] فشل الإرسال:", err.message);
-          return;
-        }
-        // تسجيل الرد للمتابعة
-        if (global.GoatBot && global.GoatBot.onReply) {
-          global.GoatBot.onReply.set(info.messageID, {
-            commandName: "groq",
-            messageID: info.messageID,
-            author: senderID,
-            threadID: threadID
-          });
-        }
-      }, messageID);
-      
-      // حفظ السياق الجديد
-      let userContentText = prompt || (allAttachments.length ? "[مرفق]" : ".");
-      context.push({ role: "user", content: userContentText });
-      context.push({ role: "assistant", content: reply });
-      if (context.length > 20) context = context.slice(-20);
-      await fs.writeJson(userSession, context, { spaces: 0 }).catch(() => {});
-      
-    } catch (err) {
-      setReaction(api, "❌", messageID, threadID);
-      let errMsg = "❌ حدث خطأ: ";
-      if (err.response?.status === 429) errMsg += "تم تجاوز الحد الأقصى للطلبات، انتظر قليلاً.";
-      else if (err.response?.status === 401) errMsg += "مفتاح API غير صالح.";
-      else if (err.code === 'ECONNABORTED') errMsg += "انتهت مهلة الاتصال.";
-      else errMsg += err.message || "فشل الاتصال";
-      api.sendMessage(errMsg, threadID, null, messageID);
-    }
+    const finalText = text || event.messageReply?.body || "";
+    await handleMessage(api, event, finalText, [...attachments, ...replyAttachments]);
   },
-  
-  onReply: async ({ api, event, message }) => {
-    const { threadID, messageID, senderID, body, attachments } = event;
-    const Reply = event?.Reply || {};
-    if (Reply.author !== senderID) return;
-    
-    let prompt = body.trim();
-    
-    // أمر مسح الذاكرة
-    if (prompt.toLowerCase() === "clear" || prompt === "مسح") {
-      const userSession = path.join(sessionsDir, `${senderID}.json`);
-      if (await fs.pathExists(userSession)) await fs.unlink(userSession);
-      return api.sendMessage("🧹 تم مسح ذاكرة المحادثة.", threadID, null, messageID);
-    }
-    
-    if (!GROQ_API_KEY) {
-      return api.sendMessage("❌ مفتاح GROQ_API_KEY غير موجود.", threadID, null, messageID);
-    }
-    
-    setReaction(api, "⏳", messageID, threadID);
-    
-    const userSession = path.join(sessionsDir, `${senderID}.json`);
-    let context = [];
-    try {
-      if (await fs.pathExists(userSession)) {
-        context = await fs.readJson(userSession);
-        if (context.length > 12) context = context.slice(-12);
-      }
-    } catch (e) { context = []; }
-    
-    try {
-      const messages = await buildGroqMessages(context, prompt, attachments || []);
-      const reply = await callGroqWithRetry(messages);
-      
-      if (!reply) throw new Error("استجابة فارغة");
-      
-      setReaction(api, "✅", messageID, threadID);
-      
-      api.sendMessage(reply, threadID, async (err, info) => {
-        if (err) return;
-        if (global.GoatBot && global.GoatBot.onReply) {
-          global.GoatBot.onReply.set(info.messageID, {
-            commandName: "groq",
-            messageID: info.messageID,
-            author: senderID,
-            threadID: threadID
-          });
-        }
-      }, messageID);
-      
-      context.push({ role: "user", content: prompt });
-      context.push({ role: "assistant", content: reply });
-      if (context.length > 20) context = context.slice(-20);
-      await fs.writeJson(userSession, context, { spaces: 0 }).catch(() => {});
-      
-    } catch (err) {
-      setReaction(api, "❌", messageID, threadID);
-      let errMsg = "❌ خطأ: ";
-      if (err.response?.status === 429) errMsg += "تم تجاوز الحد، انتظر.";
-      else errMsg += err.message || "فشل الاتصال";
-      api.sendMessage(errMsg, threadID, null, messageID);
-    }
+  onReply: async ({ api, event }) => {
+    const text = event.body?.trim() || "";
+    const attachments = event.attachments || [];
+    await handleMessage(api, event, text, attachments);
   }
 };

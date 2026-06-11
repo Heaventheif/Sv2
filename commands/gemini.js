@@ -9,6 +9,8 @@ const GEMINI_KEYS = [
   process.env.GEMINI_API_KEY_4,
 ].filter(k => k && k.length > 10);
 
+console.log(`[GEMINI] تم تحميل ${GEMINI_KEYS.length} مفتاح`);
+
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
 let keyIndex = 0;
@@ -44,13 +46,12 @@ const SYSTEM_INSTRUCTION = `أنت بوت مساعد ذكي على فيسبوك 
 - إذا أُرسلت لك صورة، حللها وصفها بدقة.
 - كن ودوداً ومهذباً ومفيداً.`;
 
-// تحميل ملف (صورة أو صوت) وتحويله إلى Base64
 async function fetchAndConvertToBase64(url, fallbackMime = "image/jpeg") {
   try {
     const response = await axios.get(url, {
       responseType: "arraybuffer",
       timeout: 20000,
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
+      headers: { "User-Agent": "Mozilla/5.0" }
     });
     const base64 = Buffer.from(response.data).toString("base64");
     const mimeType = response.headers["content-type"] || fallbackMime;
@@ -66,7 +67,6 @@ async function buildParts(text, attachments) {
 
   for (const att of attachments) {
     const type = (att.type || "").toLowerCase();
-    // استخدم أفضل رابط متاح
     const mediaUrl = att.largePreviewUrl || att.url || att.previewUrl;
     if (!mediaUrl) continue;
 
@@ -81,7 +81,7 @@ async function buildParts(text, attachments) {
         });
       } catch (err) {
         console.error("[GEMINI] فشل تحميل الصورة:", err.message);
-        parts.push({ text: `[تعذر تحميل الصورة: ${err.message}]` });
+        parts.push({ text: `[تعذر تحميل الصورة]` });
       }
     } 
     else if (type === "audio") {
@@ -95,11 +95,11 @@ async function buildParts(text, attachments) {
         });
       } catch (err) {
         console.error("[GEMINI] فشل تحميل الصوت:", err.message);
-        parts.push({ text: "[ملف صوتي - تعذر التحميل]" });
+        parts.push({ text: "[ملف صوتي]" });
       }
     }
     else if (type === "video") {
-      parts.push({ text: "[فيديو مرفق - لا يمكن معالجته حالياً]" });
+      parts.push({ text: "[فيديو مرفق]" });
     }
     else {
       parts.push({ text: `[مرفق: ${type || "ملف"}]` });
@@ -142,7 +142,6 @@ async function callGemini(contents, apiKey) {
 async function callGeminiWithRetry(contents) {
   if (!GEMINI_KEYS.length) throw new Error("لا توجد مفاتيح Gemini متاحة");
 
-  // نسخة من المفاتيح لنحاول بها بشكل دائري مع تأخير
   const triedKeys = [];
   for (let attempt = 0; attempt < GEMINI_KEYS.length * 2; attempt++) {
     const key = getNextKey();
@@ -156,31 +155,27 @@ async function callGeminiWithRetry(contents) {
     } catch (err) {
       const status = err.response?.status;
       const errorMsg = err.response?.data?.error?.message || err.message;
+      console.error(`[GEMINI] مفتاح (${triedKeys.length}) - status ${status}: ${errorMsg}`);
 
       if (status === 429) {
-        console.warn(`[GEMINI] مفتاح (${triedKeys.length}) تجاوز الحد → تأخير 3 ثوان ثم تجربة مفتاح آخر`);
+        console.warn(`[GEMINI] مفتاح ${triedKeys.length} تجاوز الحد → تأخير 3 ثوان`);
         await new Promise(r => setTimeout(r, 3000));
         continue;
-      } else if (status === 400 && errorMsg.includes("location")) {
-        console.error("[GEMINI] خطأ 400: مشكلة في المنطقة الجغرافية. قد يحتاج المفتاح إلى تفعيل الفوترة.");
-        continue;
-      } else if (status === 403) {
-        console.error("[GEMINI] مفتاح غير مصرح به (403). تحقق من صلاحياته.");
+      } else if (status === 400 || status === 403) {
+        console.error(`[GEMINI] مفتاح ${triedKeys.length} فشل بسبب: ${errorMsg}`);
         continue;
       } else {
-        console.error(`[GEMINI] خطأ غير متوقع (${status || 'network'}):`, errorMsg);
-        // إذا كان خطأ ليس 429، قد يكون المفتاح تالفاً، ننتقل للمفتاح التالي
+        console.error(`[GEMINI] خطأ غير متوقع: ${errorMsg}`);
         continue;
       }
     }
   }
-  throw new Error("جميع مفاتيح Gemini فشلت (429 أو أخطاء أخرى)");
+  throw new Error("جميع مفاتيح Gemini فشلت (تحقق من صلاحية المفاتيح أو تفعيل الفوترة)");
 }
 
 async function callGroq(contents) {
   if (!GROQ_API_KEY) throw new Error("لا يوجد مفتاح Groq");
 
-  // تحويل محتويات Gemini إلى رسائل Groq
   const messages = [
     { role: "system", content: SYSTEM_INSTRUCTION }
   ];
@@ -222,51 +217,41 @@ async function callGroq(contents) {
 async function handleMessage(api, event, promptText, attachments) {
   const { threadID, messageID, senderID } = event;
 
-  // أمر مسح الذاكرة
   if (promptText && (promptText.toLowerCase() === "clear" || promptText === "مسح")) {
-    try {
-      await fs.unlink(getSessionPath(threadID));
-    } catch (_) {}
+    try { await fs.unlink(getSessionPath(threadID)); } catch (_) {}
     return api.sendMessage("🧹 تم مسح ذاكرة المحادثة.", threadID, null, messageID);
   }
 
   if (!promptText.trim() && !attachments.length) {
     return api.sendMessage(
-      "🤖 **Sunken AI**\n\n📝 أرسل سؤالك أو صورة مع الأمر\n💡 مثال: `.gemini ما هذه الصورة؟`\n🖼️ يمكنك إرفاق صورة وسأحللها لك.",
+      "🤖 **Sunken AI**\n\n📝 أرسل سؤالك أو صورة مع الأمر\n💡 مثال: `.gemini ما هذه الصورة؟`",
       threadID, null, messageID
     );
   }
 
-  // تحميل سياق المحادثة
   let context = await loadSession(threadID);
   const newParts = await buildParts(promptText, attachments);
   const contents = [...context, { role: "user", parts: newParts }];
 
   let reply = null;
-  let usedGroq = false;
-
   try {
     reply = await callGeminiWithRetry(contents);
   } catch (geminiErr) {
-    console.warn("[GEMINI] فشلت كل محاولات Gemini:", geminiErr.message);
+    console.error("[GEMINI] فشل كلي:", geminiErr.message);
     if (GROQ_API_KEY) {
       try {
         reply = await callGroq(contents);
-        usedGroq = true;
       } catch (groqErr) {
         console.error("[GROQ] فشل:", groqErr.message);
-        return api.sendMessage("❌ جميع محاولات الذكاء الاصطناعي فشلت. حاول لاحقاً.", threadID, null, messageID);
+        return api.sendMessage(`❌ فشل Gemini: ${geminiErr.message}\n❌ فشل Groq: ${groqErr.message}`, threadID, null, messageID);
       }
     } else {
-      return api.sendMessage("❌ خدمة Gemini غير متاحة حالياً (جميع المفاتيح تجاوزت الحد).", threadID, null, messageID);
+      return api.sendMessage(`❌ ${geminiErr.message}`, threadID, null, messageID);
     }
   }
 
-  if (!reply) {
-    return api.sendMessage("❌ لم أستطع توليد رد. حاول مجدداً.", threadID, null, messageID);
-  }
+  if (!reply) return api.sendMessage("❌ لم أستطع توليد رد.", threadID, null, messageID);
 
-  // إرسال الرد
   api.sendMessage(reply, threadID, (err, info) => {
     if (!err && info && global.GoatBot && global.GoatBot.onReply) {
       global.GoatBot.onReply.set(info.messageID, {
@@ -278,11 +263,9 @@ async function handleMessage(api, event, promptText, attachments) {
     }
   }, messageID);
 
-  // حفظ السياق (بدون الصور الكبيرة)
-  const userText = promptText || (attachments.length ? "[مرفق]" : ".");
   await saveSession(threadID, [
     ...context.slice(-8),
-    { role: "user", parts: [{ text: userText }] },
+    { role: "user", parts: [{ text: promptText || (attachments.length ? "[مرفق]" : ".") }] },
     { role: "model", parts: [{ text: reply }] }
   ]);
 }
@@ -291,17 +274,14 @@ module.exports = {
   config: {
     name: "gemini",
     aliases: ["بوت", "ai", "gm", "جيميني"],
-    version: "3.3.0",
+    version: "3.4.0",
     author: "Sunken",
     countDown: 5,
     role: 0,
-    shortDescription: { ar: "محادثة ذكية تدعم الصور والصوت" },
+    shortDescription: { ar: "محادثة ذكية تدعم الصور" },
     category: "ذكاء اصطناعي",
-    guide: {
-      ar: "📌 `.gemini سؤالك`\n📌 `.gemini` مع صورة مرفقة\n📌 `.gemini clear` لمسح الذاكرة"
-    }
+    guide: { ar: ".gemini سؤالك\n.gemini مع صورة\n.gemini clear" }
   },
-
   onStart: async ({ api, event, args }) => {
     const text = args.join(" ").trim();
     const attachments = event.attachments || [];
@@ -309,7 +289,6 @@ module.exports = {
     const finalText = text || event.messageReply?.body || "";
     await handleMessage(api, event, finalText, [...attachments, ...replyAttachments]);
   },
-
   onReply: async ({ api, event }) => {
     const text = event.body?.trim() || "";
     const attachments = event.attachments || [];
