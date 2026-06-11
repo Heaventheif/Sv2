@@ -1,12 +1,11 @@
 {
   "name": "SunkenBot",
   "version": "2.0.0",
-  "description": "SunkenBot - Messenger Bot (MongoDB Edition)",
-  "main": "start.js",
+  "description": "SunkenBot - Messenger Bot (Mongoose Edition)",
+  "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "start":    "node start.js",
-    "bot-only": "node --no-warnings index.js"
+    "start": "node --no-warnings index.js"
   },
   "dependencies": {
     "@anbuinfosec/fca-unofficial": "latest",

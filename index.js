@@ -2,12 +2,13 @@
 
 /**
  * index.js — السكريبت الرئيسي للبوت
+ * يعمل مباشرة بدون start.js أو داشبورد
  *
  * الترتيب:
  *  1. معالجة الأخطاء العامة
  *  2. تعريف المتغيرات العالمية
  *  3. الاتصال بـ MongoDB (Mongoose)
- *  4. خادم Express (Keep-Alive لـ Render)
+ *  4. خادم Express مصغّر (Keep-Alive لـ Render)
  *  5. تحميل الأوامر
  *  6. تسجيل الدخول وبدء الاستماع
  */
@@ -15,7 +16,6 @@
 // ─── 0. معالجة الأخطاء العامة ────────────────────────────────
 process.on("unhandledRejection", (reason) => {
   const msg = String(reason?.message || reason || "");
-  // أخطاء داخلية من fca-unofficial — آمنة للتجاهل
   if (
     msg.includes("Missing required parameters") ||
     msg.includes("setMessageReaction") ||
@@ -34,9 +34,12 @@ process.on("uncaughtException", (err) => {
   console.error("[UncaughtException]", msg.substring(0, 200));
 });
 
+// ─── sqlite3 mock (يمنع خطأ native bindings) ─────────────────
+require("./sqlite3-mock.js");
+
 // ─── 1. التبعيات الأساسية ─────────────────────────────────────
-const fs    = require("fs-extra");
-const path  = require("path");
+const fs   = require("fs-extra");
+const path = require("path");
 const chalk = require("chalk");
 
 try { require("dotenv").config(); } catch (_) {}
@@ -58,8 +61,9 @@ global.eventCommands     = [];
 global.appState          = {};
 global.threadConfigs     = new Map();
 global.botApi            = null;
-global.db                = null; // سيُعيَّن بعد الاتصال بـ MongoDB
+global.db                = null;
 global.maintenanceMode   = false;
+global.disabledGroups    = {};
 
 // ─── Logger ──────────────────────────────────────────────────
 global.log = {
@@ -69,31 +73,13 @@ global.log = {
   success: (msg) => console.log(chalk.green("[SUCCESS]"), msg),
 };
 
-// ─── Paths ───────────────────────────────────────────────────
-const DASHBOARD_DATA       = path.join(__dirname, "dashboard", "data");
-const DISABLED_GROUPS_PATH = path.join(DASHBOARD_DATA, "disabled-groups.json");
-const GROUPS_CACHE_PATH    = path.join(DASHBOARD_DATA, "groups-cache.json");
-const OUTBOX_PATH          = path.join(DASHBOARD_DATA, "outbox.json");
-
-// ─── JSON helpers ────────────────────────────────────────────
-function readJson(fp, fallback = null) {
-  try { return JSON.parse(fs.readFileSync(fp, "utf-8")); }
-  catch { return fallback; }
-}
-function writeJson(fp, data) {
-  try {
-    fs.mkdirSync(path.dirname(fp), { recursive: true });
-    fs.writeFileSync(fp, JSON.stringify(data, null, 2), "utf-8");
-  } catch (e) { console.warn("[DB] فشل الكتابة:", e.message); }
-}
-
 // ─── تحميل config.json ───────────────────────────────────────
 try {
   const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, "config.json"), "utf8"));
   global.config = { ...global.config, ...cfg, Prefix: cfg.Prefix || ["."] };
 } catch { console.warn("[WARN] Using default config"); }
 
-// ─── Role sets (Map سريعة بدل indexOf) ───────────────────────
+// ─── Role sets ────────────────────────────────────────────────
 function buildRoleSets() {
   global._roles = {
     dev: new Set((global.config.developers || []).map(String)),
@@ -125,44 +111,41 @@ global.checkCooldown = (u, c) => {
 global.reloadCommands = () => loadCommands();
 
 // ─── تحميل AppState ──────────────────────────────────────────
-let dashboardOnly = false;
 try {
   const p = path.join(__dirname, "appstate.json");
   if (fs.existsSync(p)) {
     global.appState = JSON.parse(fs.readFileSync(p, "utf8"));
+    console.log(chalk.green("[BOT] ✅ تم تحميل appstate.json"));
   } else if (process.env.APPSTATE || process.env.APPSTATE_BOT1) {
     global.appState = JSON.parse(process.env.APPSTATE || process.env.APPSTATE_BOT1);
+    console.log(chalk.green("[BOT] ✅ تم تحميل AppState من متغيرات البيئة"));
   } else {
-    dashboardOnly = true;
-    console.warn(chalk.yellow("[WARN] لم يُعثر على appstate — وضع الداشبورد فقط"));
+    console.error(chalk.red("[FATAL] لم يُعثر على appstate — ضع appstate.json أو APPSTATE في البيئة"));
+    process.exit(1);
   }
-} catch {
-  dashboardOnly = true;
-  console.warn(chalk.yellow("[WARN] فشل تحليل AppState — وضع الداشبورد فقط"));
+} catch (err) {
+  console.error(chalk.red("[FATAL] فشل تحليل AppState:"), err.message);
+  process.exit(1);
 }
 
 // ══════════════════════════════════════════════════════════════
 //  3. الاتصال بـ MongoDB (Mongoose)
-//     منطق الاتصال موحَّد في db/index.js
 // ══════════════════════════════════════════════════════════════
 const { connectDB } = require("./db");
 
 // ══════════════════════════════════════════════════════════════
-//  4. خادم Express — Keep-Alive لـ Render
-//     يمنع Render من إدخال البوت في وضع النوم (Spin-down)
+//  4. خادم Express مصغّر — Keep-Alive فقط (بدون داشبورد)
 // ══════════════════════════════════════════════════════════════
 function startWebServer() {
   const express = require("express");
   const app     = express();
 
-  // ─── الصفحة الرئيسية ───────────────────────────────────────
   app.get("/", (_req, res) => {
-    const mem  = process.memoryUsage();
-    const up   = process.uptime();
-    const h    = Math.floor(up / 3600);
-    const m    = Math.floor((up % 3600) / 60);
-    const s    = Math.floor(up % 60);
-
+    const mem = process.memoryUsage();
+    const up  = process.uptime();
+    const h   = Math.floor(up / 3600);
+    const m   = Math.floor((up % 3600) / 60);
+    const s   = Math.floor(up % 60);
     res.json({
       status:    "✅ البوت يعمل",
       botName:   global.config.botName || "Sunken Bot",
@@ -174,32 +157,27 @@ function startWebServer() {
     });
   });
 
-  // ─── Healthcheck لـ Render ─────────────────────────────────
-  app.get("/health", (_req, res) => {
-    res.status(200).json({ status: "ok" });
-  });
+  app.get("/health", (_req, res) => res.status(200).json({ status: "ok" }));
 
-  // ─── تشغيل الداشبورد إن وُجد ──────────────────────────────
-  try {
-    const dashboardRouter = require("./dashboard/server.js");
-    if (typeof dashboardRouter === "function") {
-      app.use(dashboardRouter);
-      console.log(chalk.blue("[WEB] 🌐 الداشبورد مُدمَج"));
-    }
-  } catch (_) {
-    // الداشبورد اختياري — يُتجاهل إن لم يكن موجوداً
-  }
+  app.use((_req, res) => res.status(404).json({ error: "404" }));
 
-  // ─── Fallback 404 ──────────────────────────────────────────
-  app.use((_req, res) => {
-    res.status(404).json({ error: "404 — المسار غير موجود" });
-  });
-
-  // ─── بدء الاستماع على PORT ─────────────────────────────────
   const PORT = parseInt(process.env.PORT || "3000", 10);
-  app.listen(PORT, () => {
-    console.log(chalk.green(`[WEB] ✅ الخادم يعمل على البورت ${PORT}`));
-  });
+  app.listen(PORT, () =>
+    console.log(chalk.green(`[WEB] ✅ Keep-Alive server على البورت ${PORT}`))
+  );
+
+  // Keep-Alive ping كل 14 دقيقة لمنع Render من Sleep
+  setTimeout(() => {
+    const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+    setInterval(() => {
+      try {
+        const mod = url.startsWith("https") ? require("https") : require("http");
+        mod.get(url + "/health", (r) => {
+          if (r.statusCode !== 200) console.warn("[KEEP-ALIVE] ⚠️", r.statusCode);
+        }).on("error", () => {});
+      } catch (_) {}
+    }, 14 * 60 * 1000);
+  }, 10_000);
 
   global.expressApp = app;
 }
@@ -209,7 +187,10 @@ function startWebServer() {
 // ══════════════════════════════════════════════════════════════
 function loadCommands() {
   const dir = path.join(__dirname, "commands");
-  if (!fs.existsSync(dir)) { console.error("[ERROR] مجلد commands غير موجود"); return; }
+  if (!fs.existsSync(dir)) {
+    console.error("[ERROR] مجلد commands غير موجود");
+    return;
+  }
 
   global.commands.clear();
   global.nonPrefixCommands.clear();
@@ -221,7 +202,7 @@ function loadCommands() {
 
   for (const file of files) {
     try {
-      const p   = path.join(dir, file);
+      const p = path.join(dir, file);
       delete require.cache[require.resolve(p)];
       const raw = require(p);
       const mod = raw.default || raw;
@@ -240,70 +221,8 @@ function loadCommands() {
       console.warn(chalk.yellow(`[WARN] فشل تحميل '${file}':`), err.message);
     }
   }
+
   console.log(chalk.blue(`[INFO] ✅ تم تحميل ${global.commands.size} أمر`));
-}
-
-// ══════════════════════════════════════════════════════════════
-//  Disabled Groups Cache (كاش في الذاكرة — قراءة ملف كل 30 ث)
-// ══════════════════════════════════════════════════════════════
-let _disabledCache = {};
-function refreshDisabledCache() { _disabledCache = readJson(DISABLED_GROUPS_PATH, {}); }
-refreshDisabledCache();
-setInterval(refreshDisabledCache, 30_000);
-global.refreshDisabledCache = refreshDisabledCache;
-
-function isGroupDisabled(threadID) { return !!_disabledCache[threadID]; }
-
-// ══════════════════════════════════════════════════════════════
-//  Outbox (رسائل الداشبورد → Messenger)
-// ══════════════════════════════════════════════════════════════
-let outboxBusy = false;
-function processOutbox() {
-  if (outboxBusy || !global.botApi) return;
-  const outbox  = readJson(OUTBOX_PATH, []);
-  const pending = outbox.filter((e) => e.status === "pending");
-  if (!pending.length) return;
-
-  outboxBusy = true;
-  (async () => {
-    const updated = outbox.map((e) => ({ ...e }));
-    for (const entry of updated) {
-      if (entry.status !== "pending") continue;
-      entry.status = "sending";
-      for (const tid of entry.threadIDs || []) {
-        try {
-          await new Promise((res, rej) =>
-            global.botApi.sendMessage(entry.message, tid, (err) => (err ? rej(err) : res()))
-          );
-          await new Promise((r) => setTimeout(r, 600));
-        } catch (e) { console.warn("[Outbox]", tid, e.message); }
-      }
-      entry.status = "sent";
-      entry.sentAt = new Date().toISOString();
-    }
-    writeJson(OUTBOX_PATH, updated.filter((e) => e.status !== "sent"));
-    outboxBusy = false;
-  })().catch(() => { outboxBusy = false; });
-}
-
-// ══════════════════════════════════════════════════════════════
-//  Groups Cache
-// ══════════════════════════════════════════════════════════════
-function cacheGroups() {
-  if (!global.botApi) return;
-  global.botApi.getThreadList(30, null, ["INBOX"], (err, threads) => {
-    if (err || !threads) return;
-    const cache = readJson(GROUPS_CACHE_PATH, {});
-    for (const t of threads) {
-      if (!t.isGroup) continue;
-      cache[t.threadID] = {
-        name:             t.name || `مجموعة ${t.threadID.slice(-6)}`,
-        participantCount: t.participantIDs?.length || 0,
-        lastSeen:         new Date().toISOString(),
-      };
-    }
-    writeJson(GROUPS_CACHE_PATH, cache);
-  });
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -312,7 +231,7 @@ function cacheGroups() {
 const handleMessage = async (api, event) => {
   const { threadID, senderID, body, messageReply, messageID } = event;
   if (!body?.trim() || !messageID || !threadID || !senderID) return;
-  if (isGroupDisabled(threadID)) return;
+  if (global.disabledGroups?.[threadID]) return;
 
   const messageText = body.trim();
 
@@ -460,29 +379,22 @@ function startMemoryCleanup() {
 
 // ══════════════════════════════════════════════════════════════
 //  6. نقطة الدخول الرئيسية
-//  الترتيب مهم جداً:
-//   MongoDB أولاً ← خادم الويب ← تحميل الأوامر ← تسجيل الدخول
 // ══════════════════════════════════════════════════════════════
 async function main() {
   console.log(chalk.bold.green("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
-  console.log(chalk.bold.green("   🌿 Sunken Bot — بدء التشغيل"));
+  console.log(chalk.bold.green("   🌿 Sunken Bot (Mongoose Edition)"));
   console.log(chalk.bold.green("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"));
 
-  // ── الخطوة 1: الاتصال بـ MongoDB ──────────────────────────
+  // 1. الاتصال بـ MongoDB
   await connectDB();
 
-  // ── الخطوة 2: خادم Express (Keep-Alive) ───────────────────
+  // 2. خادم Express (Keep-Alive)
   startWebServer();
 
-  // ── الخطوة 3: تحميل الأوامر ───────────────────────────────
+  // 3. تحميل الأوامر
   loadCommands();
 
-  // ── الخطوة 4: تسجيل الدخول ────────────────────────────────
-  if (dashboardOnly) {
-    console.log(chalk.yellow("[BOT] ⚠️ وضع الداشبورد فقط — لا يوجد appstate"));
-    return;
-  }
-
+  // 4. تسجيل الدخول
   const login = require("@anbuinfosec/fca-unofficial");
   login({ appState: global.appState }, (err, api) => {
     if (err) {
@@ -503,21 +415,11 @@ async function main() {
     global.botApi = api;
     console.log(chalk.green("[BOT] ✅ تم تسجيل الدخول بنجاح"));
 
-    // بدء الاستماع
     startListening(api);
-
-    // جلب المجموعات لأول مرة بعد 5 ثواني
-    setTimeout(cacheGroups, 5_000);
-
-    // معالجة رسائل الداشبورد كل 30 ثانية
-    setInterval(processOutbox, 30_000);
-
-    // تنظيف الذاكرة كل 30 دقيقة
     startMemoryCleanup();
   });
 }
 
-// ─── تشغيل ────────────────────────────────────────────────────
 main().catch((err) => {
   console.error(chalk.red("[FATAL] خطأ في التشغيل:"), err.message);
   process.exit(1);
