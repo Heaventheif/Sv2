@@ -34,9 +34,6 @@ process.on("uncaughtException", (err) => {
   console.error("[UncaughtException]", msg.substring(0, 200));
 });
 
-// ─── sqlite3 mock (يمنع خطأ native bindings) ─────────────────
-require("./sqlite3-mock.js");
-
 // ─── 1. التبعيات الأساسية ─────────────────────────────────────
 const fs   = require("fs-extra");
 const path = require("path");
