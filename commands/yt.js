@@ -2,15 +2,33 @@ const axios = require("axios");
 
 const BASE = "https://yt-dlp-stream.onrender.com/api";
 
-// ─── تحميل الملف كـ Buffer ثم تحويله لـ Stream ──────────────
-// render لا يدعم stream مباشرة مع Facebook API
+// ─── تحميل الملف على /tmp ثم إرساله كـ ReadStream ──────────
+// نفس طريقة sing.js — متوافق مع render
+const fs   = require("fs-extra");
+const os   = require("os");
+const path = require("path");
+
 async function getStream(url) {
-  const res = await axios.get(url, { responseType: "arraybuffer", timeout: 120000, maxContentLength: 100 * 1024 * 1024 });
-  const { Readable } = require("stream");
-  const readable = new Readable();
-  readable.push(Buffer.from(res.data));
-  readable.push(null);
-  return readable;
+  const ext      = url.match(/\.(mp4|mp3|webm|m4a)/i)?.[1] || "mp3";
+  const filePath = path.join(os.tmpdir(), `yt_${Date.now()}.${ext}`);
+
+  const res = await axios.get(url, {
+    responseType:      "arraybuffer",
+    timeout:           120000,
+    maxContentLength:  50 * 1024 * 1024,  // 50MB
+    maxBodyLength:     50 * 1024 * 1024,
+  });
+
+  const buffer = Buffer.from(res.data);
+  if (buffer.length === 0)          throw new Error("الملف فارغ.");
+  if (buffer.length > 26214400)     throw new Error("الملف أكبر من 25MB.");
+
+  await fs.writeFile(filePath, buffer);
+  return { stream: fs.createReadStream(filePath), filePath };
+}
+
+async function cleanTemp(filePath) {
+  try { if (await fs.pathExists(filePath)) await fs.remove(filePath); } catch (_) {}
 }
 
 // ─── حذف رسالة الانتظار بأمان ────────────────────────────────
@@ -175,12 +193,15 @@ module.exports = {
         return message.reply(`❌ الرابط غير متاح.\n💡 جرّب: .yt ${wantMp4 ? "" : "mp4 "}${query}`);
       }
 
-      const stream = await getStream(url);
+      const { stream, filePath } = await getStream(url);
       safeUnsend(message, wait);
-      return message.reply({
-        body: `${wantMp4 ? "🎬" : "🎵"} ${p.title}\n📺 ${p.author}`.trim(),
-        attachment: stream
-      });
+      try {
+        await message.reply({
+          body:       `${wantMp4 ? "🎬" : "🎵"} ${p.title}\n📺 ${p.author}`.trim(),
+          attachment: stream
+        });
+      } finally { await cleanTemp(filePath); }
+      return;
     } catch (e) {
       safeUnsend(message, wait);
       return message.reply("❌ " + (e.response?.data?.error || e.message));
@@ -209,9 +230,14 @@ module.exports = {
         return message.reply("❌ الرابط غير متاح.");
       }
 
-      const stream = await getStream(url);
+      const { stream, filePath } = await getStream(url);
       safeUnsend(message, wait);
-      message.reply({ body: `${wantMp4 ? "🎬" : "🎵"} ${p.title}`, attachment: stream });
+      try {
+        await message.reply({
+          body:       `${wantMp4 ? "🎬" : "🎵"} ${p.title}`.trim(),
+          attachment: stream
+        });
+      } finally { await cleanTemp(filePath); }
     } catch (e) {
       safeUnsend(message, wait);
       message.reply("❌ " + (e.response?.data?.error || e.message));
