@@ -226,20 +226,37 @@ const handleMessage = async (api, event) => {
   // ─── Reply handler ────────────────────────────────────────
   if (messageReply && global.Kagenou.replies?.[messageReply.messageID]) {
     const replyData = global.Kagenou.replies[messageReply.messageID];
-    delete global.Kagenou.replies[messageReply.messageID];
+    // لا نحذف الرد حتى نتأكد من التنفيذ
     if (!replyData.author || replyData.author === senderID) {
-      try {
-        await replyData.callback({
-          api, event,
-          message: {
-            reply:         txt => api.sendMessage(txt, threadID, null, messageID),
-            registerReply: (id, d, cb) => {
-              global.Kagenou.replies[id] = { callback: cb, author: senderID, timestamp: Date.now(), ...d };
-            }
+      delete global.Kagenou.replies[messageReply.messageID];
+      // يدعم كلاً من: onReply (yt.js) و callback (أوامر أخرى)
+      // إذا لم يكن هناك handler محفوظ، ابحث عن onReply في الأمر نفسه
+      const cmdForReply = replyData.commandName
+        ? global.commands.get(replyData.commandName)
+        : null;
+      const handler = replyData.onReply || replyData.callback ||
+        (cmdForReply?.onReply ? (...a) => cmdForReply.onReply(...a) : null);
+      if (typeof handler === "function") {
+        const replyMessage = {
+          reply: (t, cb) => {
+            return new Promise((resolve) => {
+              api.sendMessage(t, threadID, (err, info) => {
+                if (cb) cb(err, info);
+                resolve(info);
+              }, messageID);
+            });
           },
-          Reply: replyData,
-        });
-      } catch (e) { console.error("[REPLY ERROR]", e.message); }
+          unsend: (msgID) => {
+            try { api.unsendMessage(msgID, () => {}); } catch (_) {}
+          },
+          registerReply: (id, d, cb) => {
+            global.Kagenou.replies[id] = { callback: cb, author: senderID, timestamp: Date.now(), ...d };
+          }
+        };
+        try {
+          await handler({ api, event, message: replyMessage, Reply: replyData });
+        } catch (e) { console.error("[REPLY ERROR]", e.message); }
+      }
     }
     return;
   }
@@ -269,7 +286,18 @@ const handleMessage = async (api, event) => {
     const ctx = {
       api, event, args,
       message: {
-        reply:         t => api.sendMessage(t, threadID, null, messageID),
+        // يدعم: string | { body, attachment } | callback(err, info)
+        reply: (t, cb) => {
+          return new Promise((resolve) => {
+            api.sendMessage(t, threadID, (err, info) => {
+              if (cb) cb(err, info);
+              resolve(info);
+            }, messageID);
+          });
+        },
+        unsend: (msgID) => {
+          try { api.unsendMessage(msgID, () => {}); } catch (_) {}
+        },
         registerReply: (id, d, cb) => {
           global.Kagenou.replies[id] = { callback: cb, author: senderID, timestamp: Date.now(), ...d };
         }
