@@ -18,10 +18,11 @@ global.botApi           = null;
 global.maintenanceMode  = false;
 global.disabledGroups   = {};
 
-const fs    = require("fs-extra");
-const path  = require("path");
-const login = require("@anbuinfosec/fca-unofficial");
-const chalk = require("chalk");
+const fs      = require("fs-extra");
+const path    = require("path");
+const login   = require("@anbuinfosec/fca-unofficial");
+const chalk   = require("chalk");
+const express = require("express");
 
 try { require("dotenv").config(); } catch (_) {}
 
@@ -330,6 +331,49 @@ const startListening = (api) => {
   console.log(chalk.green("[SUCCESS] Bot listening..."));
 };
 
+// ─── Web Server (Render keep-alive) ──────────────────────────
+// يجب أن يبدأ أولاً — Render ينتظر منفذاً مفتوحاً خلال 3-4 دقائق
+function startWebServer() {
+  const PORT = parseInt(process.env.PORT || "10000");
+  const app  = express();
+
+  // الصفحة الرئيسية — تُظهر حالة البوت
+  app.get("/", (_req, res) => {
+    res.send(`
+      <!DOCTYPE html><html lang="ar" dir="rtl">
+      <head><meta charset="UTF-8"><title>${global.config.botName}</title></head>
+      <body style="font-family:sans-serif;padding:30px;background:#0d1117;color:#c9d1d9">
+        <h2>🤖 ${global.config.botName}</h2>
+        <p>الحالة: <b style="color:#3fb950">✅ يعمل</b></p>
+        <p>⏱️ Uptime: ${Math.floor(process.uptime())} ثانية</p>
+        <p>📦 الأوامر: ${global.commands.size}</p>
+        <p>🔗 البوت: ${global.botApi ? "متصل" : "جاري الاتصال..."}</p>
+      </body></html>
+    `);
+  });
+
+  // health check — هذا ما يستخدمه Render (healthCheckPath: /api/health)
+  app.get("/health",     healthHandler);
+  app.get("/api/health", healthHandler);
+
+  function healthHandler(_req, res) {
+    res.json({
+      status:    "ok",
+      bot:       global.botApi ? "connected" : "connecting",
+      commands:  global.commands.size,
+      uptime:    Math.floor(process.uptime()),
+      memory:    `${Math.round(process.memoryUsage().rss / 1024 / 1024)} MB`,
+      timestamp: new Date().toISOString(),
+    });
+  }
+
+  app.listen(PORT, () => {
+    console.log(chalk.green(`[SUCCESS] 🌐 Web server على المنفذ ${PORT}`));
+  });
+
+  global.expressApp = app;
+}
+
 // ─── DB ──────────────────────────────────────────────────────
 async function connectDB() {
   const uri = process.env.MONGO_URI || global.config.mongoUri;
@@ -345,6 +389,9 @@ async function connectDB() {
 
 // ─── Startup ─────────────────────────────────────────────────
 const startBot = async () => {
+  // ① أول شيء: افتح المنفذ — Render يرفض العملية إذا لم يجد port خلال دقائق
+  startWebServer();
+
   await connectDB();
   loadCommands();
 
