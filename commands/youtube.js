@@ -1,43 +1,21 @@
-const axios = require("axios");
-const BASE = "https://free-goat-api.onrender.com";
+const { apiFetch, sendMedia, safeUnsend } = require("../utils/mediaHelper");
 
 module.exports = {
   config: {
-    name: "youtube",
-    aliases: ["yt", "ytdl"],
-    version: "1.0",
-    role: 0,
-    author: "Fahim API",
-    countDown: 10,
+    name: "youtube", aliases: ["yt"],
+    version: "1.0", role: 0, countDown: 10,
     category: "download",
-    longDescription: "تحميل فيديو أو صوت من يوتيوب",
-    guide: { en: "{pn} <رابط اليوتيوب>" }
+    guide: { en: "{pn} <رابط يوتيوب>" }
   },
-
-  onStart: async function ({ message, args }) {
-    if (!args[0]) return message.reply("❌ أرسل رابط يوتيوب.\nمثال: .youtube https://youtu.be/xxxx");
-
-    const url = args[0];
-    const wait = await message.reply("⏳ جارٍ جلب معلومات الفيديو...");
-
+  onStart: async ({ message, args }) => {
+    if (!args[0]) return message.reply("❌ أرسل رابط يوتيوب.");
+    const wait = await message.reply("⏳ جارٍ تحميل الفيديو...");
     try {
-      const { data } = await axios.get(`${BASE}/youtube?url=${encodeURIComponent(url)}`);
-
-      if (!data) return message.reply("❌ تعذّر جلب الفيديو.");
-
-      // بعض APIs ترجع مباشرة رابط التحميل
-      const videoUrl = data.videoUrl || data.url || data.download || data.video;
-      if (!videoUrl) return message.reply("❌ لم يُعثر على رابط التحميل.\nتفاصيل: " + JSON.stringify(data).substring(0, 200));
-
-      const stream = await global.utils.getStreamFromURL(videoUrl, "video.mp4");
-      message.unsend(wait.messageID);
-      message.reply({
-        body: `✅ تم التحميل بنجاح!\n🎬 ${data.title || "فيديو يوتيوب"}`,
-        attachment: stream
-      });
-    } catch (err) {
-      message.unsend(wait.messageID);
-      message.reply("❌ خطأ: " + (err.response?.data?.error || err.message));
+      const data = await apiFetch("youtube", { url: args[0] });
+      await sendMedia(message, wait, data, `🎬 ${data.title || "فيديو يوتيوب"}`);
+    } catch (e) {
+      safeUnsend(message, wait);
+      message.reply("❌ " + (e.response?.data?.error || e.message));
     }
   }
 };

@@ -1,40 +1,11 @@
-const axios = require("axios");
-const BASE = "https://free-goat-api.onrender.com";
-
+// ─── هذا الملف يُصدِّر أمراً واحداً فقط — facebook ─────────
+const { apiFetch, sendMedia, safeUnsend } = require("../utils/mediaHelper");
 module.exports = {
-  config: {
-    name: "facebook",
-    aliases: ["fb", "fbdl"],
-    version: "1.0",
-    role: 0,
-    author: "Fahim API",
-    countDown: 10,
-    category: "download",
-    longDescription: "تحميل فيديو من فيسبوك",
-    guide: { en: "{pn} <رابط الفيديو>" }
-  },
-
-  onStart: async function ({ message, args }) {
-    if (!args[0]) return message.reply("❌ أرسل رابط فيديو فيسبوك.\nمثال: .fb https://fb.com/...");
-
-    const url = args[0];
+  config: { name: "facebook", aliases: ["fb"], version: "1.0", role: 0, countDown: 10, category: "download", guide: { en: "{pn} <رابط فيسبوك>" } },
+  onStart: async ({ message, args }) => {
+    if (!args[0]) return message.reply("❌ أرسل رابط فيسبوك.");
     const wait = await message.reply("⏳ جارٍ تحميل الفيديو...");
-
-    try {
-      const { data } = await axios.get(`${BASE}/facebook?url=${encodeURIComponent(url)}`);
-
-      const videoUrl = data.videoUrl || data.url || data.download || data.hd || data.sd;
-      if (!videoUrl) return message.reply("❌ لم يُعثر على رابط.\n" + JSON.stringify(data).substring(0, 200));
-
-      const stream = await global.utils.getStreamFromURL(videoUrl, "fb-video.mp4");
-      message.unsend(wait.messageID);
-      message.reply({
-        body: "✅ تم تحميل الفيديو من فيسبوك!",
-        attachment: stream
-      });
-    } catch (err) {
-      message.unsend(wait.messageID);
-      message.reply("❌ خطأ: " + (err.response?.data?.error || err.message));
-    }
+    try { await sendMedia(message, wait, await apiFetch("facebook", { url: args[0] }), "📘 فيديو فيسبوك"); }
+    catch (e) { safeUnsend(message, wait); message.reply("❌ " + (e.response?.data?.error || e.message)); }
   }
 };
