@@ -29,18 +29,34 @@ async function v3(query, limit = 8) {
 }
 
 // ─── تحليل response الفعلي ───────────────────────────────────
-// البنية: data.info.title / data.media.mp4.url / data.media.mp3.url
+// API يُعيد حقولاً مسطّحة: title, mp4, mp3, short_url ...
+// وأحياناً متداخلة تحت info{}/media{} — نجرّب الاثنين
 function parse(d) {
+  if (!d || typeof d !== "object") return {
+    title: "بدون عنوان", author: "", thumbnail: null,
+    duration: "", views: 0, mp4Url: null, mp3Url: null,
+    shortUrl: "", category: ""
+  };
+
+  const info  = (d.info  && typeof d.info  === "object") ? d.info  : d;
+  const media = (d.media && typeof d.media === "object") ? d.media : d;
+
   return {
-    title:     d.info?.title     || d.title     || "بدون عنوان",
-    author:    d.info?.author    || d.author    || "",
-    thumbnail: d.info?.thumbnail || d.thumbnail || null,
-    duration:  d.info?.duration  || d.duration  || "",
-    views:     d.info?.views     || d.views     || 0,
-    mp4Url:    d.media?.mp4?.url || d.media?.mp4 || null,
-    mp3Url:    d.media?.mp3?.url || d.media?.mp3 || null,
-    shortUrl:  d.short_url || d.url || "",
-    category:  d.category  || ""
+    title:     info.title     || "بدون عنوان",
+    author:    info.author    || info.channel || "",
+    thumbnail: info.thumbnail || null,
+    duration:  info.duration  || "",
+    views:     info.views     || 0,
+    mp4Url:
+      (media.mp4 && typeof media.mp4 === "object" ? media.mp4.url : media.mp4) ||
+      (d.mp4     && typeof d.mp4     === "object" ? d.mp4.url     : d.mp4)     ||
+      d.videoUrl || d.video || null,
+    mp3Url:
+      (media.mp3 && typeof media.mp3 === "object" ? media.mp3.url : media.mp3) ||
+      (d.mp3     && typeof d.mp3     === "object" ? d.mp3.url     : d.mp3)     ||
+      d.audioUrl || d.audio || null,
+    shortUrl: d.short_url || d.url || info.short_url || "",
+    category: d.category  || info.category || ""
   };
 }
 
