@@ -130,7 +130,7 @@ module.exports = {
     }
 
     if (!fbUrl) return;
-    await downloadAndSend(api, event, fbUrl);
+    await downloadAndSend(api, event, fbUrl, "360p");
   },
 
   // ─── أمر يدوي ─────────────────────────────────────────────
@@ -144,7 +144,7 @@ module.exports = {
 
     const wantHD  = args[0].toLowerCase() === "hd";
     const url     = wantHD ? args[1] : args[0];
-    const quality = wantHD ? "720p" : "best";
+    const quality = wantHD ? "720p" : "360p";
 
     if (!url) return message.reply("❌ أرسل الرابط بعد hd.");
 

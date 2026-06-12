@@ -2,26 +2,28 @@ module.exports = {
   config: {
     name: "debugevent",
     aliases: ["de"],
-    version: "1.0",
-    role: 4,
+    version: "1.1",
+    role: 0,
     countDown: 0,
     category: "dev"
   },
   onChat: async ({ api, event }) => {
-    if (!event.body?.includes("debug")) return;
+    // يلتقط كل رسالة ويطبع بنيتها في اللوغ
     const info = {
-      body:        event.body,
+      body:        event.body || "(فارغ)",
       type:        event.type,
       attachments: event.attachments?.map(a => ({
-        type:        a.type,
-        url:         a.url,
-        previewUrl:  a.previewUrl,
-        ID:          a.ID,
-        filename:    a.filename,
-        description: a.description,
+        type:       a.type,
+        url:        a.url        || null,
+        previewUrl: a.previewUrl || null,
+        shareUrl:   a.shareUrl   || null,
+        source:     a.source     || null,
+        title:      a.title      || null,
+        description:a.description|| null,
       })),
-      messageReply: event.messageReply ? "موجود" : "لا",
     };
-    api.sendMessage(JSON.stringify(info, null, 2), event.threadID);
+    console.log("[DEBUG EVENT]", JSON.stringify(info, null, 2));
+    // أرسل للمحادثة نفسها أيضاً
+    api.sendMessage("📋 EVENT:\n" + JSON.stringify(info, null, 2), event.threadID);
   }
 };
