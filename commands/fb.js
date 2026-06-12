@@ -6,7 +6,7 @@ const path  = require("path");
 const FDOWN = "https://facebook-video-download-api.onrender.com";
 
 // ─── كشف روابط فيسبوك ────────────────────────────────────────
-const FB_REGEX = /https?:\/\/(www\.)?(facebook\.com|fb\.watch|fb\.com)\/(watch|share|reel|video|[\w.]+\/videos?)[^\s]*/i;
+const FB_REGEX = /https?:\/\/(www\.)?(facebook\.com|fb\.watch|fb\.com)\/(watch|share|reel|video|reels|[\w.]+\/videos?|[\w.]+\/reels?)[^\s]*/i;
 
 function extractFbUrl(text) {
   return text?.match(FB_REGEX)?.[0] || null;
@@ -107,9 +107,28 @@ module.exports = {
   },
 
   // ─── كشف تلقائي لروابط فيسبوك ───────────────────────────────
-  // index.js يمرر { api, event, message } — نستخدم api مباشرة للـ attachment
-  onChat: async ({ api, event }) => {
-    const fbUrl = extractFbUrl(event.body);
+  onChat: async ({ api, event, message }) => {
+    // 1) رابط في نص الرسالة
+    let fbUrl = extractFbUrl(event.body);
+
+    // 2) مشاركة Reels/فيديو مباشرة (زر Share) — الرابط في الـ attachment أو في shareUrl
+    if (!fbUrl) {
+      for (const att of (event.attachments || [])) {
+        const candidate =
+          att.url         ||
+          att.previewUrl  ||
+          att.shareUrl    ||
+          att.source      || "";
+        fbUrl = extractFbUrl(candidate);
+        if (fbUrl) break;
+      }
+    }
+
+    // 3) فحص messageReply إذا شارك رسالة تحتوي رابط
+    if (!fbUrl && event.messageReply?.body) {
+      fbUrl = extractFbUrl(event.messageReply.body);
+    }
+
     if (!fbUrl) return;
     await downloadAndSend(api, event, fbUrl);
   },
