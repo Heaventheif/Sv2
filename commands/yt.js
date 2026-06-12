@@ -2,10 +2,15 @@ const axios = require("axios");
 
 const BASE = "https://yt-dlp-stream.onrender.com/api";
 
-// ─── جلب stream من URL مباشرة بدون global.utils ──────────────
+// ─── تحميل الملف كـ Buffer ثم تحويله لـ Stream ──────────────
+// render لا يدعم stream مباشرة مع Facebook API
 async function getStream(url) {
-  const res = await axios.get(url, { responseType: "stream", timeout: 60000 });
-  return res.data;
+  const res = await axios.get(url, { responseType: "arraybuffer", timeout: 120000, maxContentLength: 100 * 1024 * 1024 });
+  const { Readable } = require("stream");
+  const readable = new Readable();
+  readable.push(Buffer.from(res.data));
+  readable.push(null);
+  return readable;
 }
 
 // ─── حذف رسالة الانتظار بأمان ────────────────────────────────
@@ -20,17 +25,27 @@ function safeUnsend(message, wait) {
 
 // ─── طلبات الـ API ────────────────────────────────────────────
 async function v1(query) {
-  const { data } = await axios.get(`${BASE}/v1/q`, { params: { "": query }, timeout: 30000 });
+  // الـ API يستخدم v2 — المفتاح فارغ "" كما هو في الـ URL: /api/v2/q?=query
+  const res = await axios.get(`${BASE}/v2/q`, { params: { "": query }, timeout: 30000 });
+  const data = res.data;
+  if (Array.isArray(data)) return data[0] || {};
+  if (!data || typeof data !== "object") return {};
   return data;
 }
 async function v3(query, limit = 8) {
-  const { data } = await axios.get(`${BASE}/v3/q`, { params: { "": query, " ": limit }, timeout: 25000 });
-  return data;
+  const res = await axios.get(`${BASE}/v3/q`, { params: { "": query, " ": limit }, timeout: 25000 });
+  const data = res.data;
+  if (Array.isArray(data)) return { results: data };
+  if (!data || typeof data !== "object") return { results: [] };
+  // بعض الـ APIs تُعيد المصفوفة مباشرة داخل data أو results
+  if (Array.isArray(data.results)) return data;
+  if (Array.isArray(data.data)) return { results: data.data };
+  return { results: [] };
 }
 
 // ─── تحليل response الفعلي ───────────────────────────────────
-// API يُعيد حقولاً مسطّحة: title, mp4, mp3, short_url ...
-// وأحياناً متداخلة تحت info{}/media{} — نجرّب الاثنين
+// بنية الـ API v2:
+// { title, media: { mp4: "url_string", mp3: "url_string" }, ... }
 function parse(d) {
   if (!d || typeof d !== "object") return {
     title: "بدون عنوان", author: "", thumbnail: null,
@@ -38,25 +53,28 @@ function parse(d) {
     shortUrl: "", category: ""
   };
 
-  const info  = (d.info  && typeof d.info  === "object") ? d.info  : d;
-  const media = (d.media && typeof d.media === "object") ? d.media : d;
+  // media قد يكون كائناً { mp4: string, mp3: string }
+  const m = (d.media && typeof d.media === "object" && !Array.isArray(d.media))
+    ? d.media : {};
+
+  // استخرج الرابط: إما string مباشرة أو { url: string }
+  function getUrl(field) {
+    if (!field) return null;
+    if (typeof field === "string") return field;
+    if (typeof field === "object" && typeof field.url === "string") return field.url;
+    return null;
+  }
 
   return {
-    title:     info.title     || "بدون عنوان",
-    author:    info.author    || info.channel || "",
-    thumbnail: info.thumbnail || null,
-    duration:  info.duration  || "",
-    views:     info.views     || 0,
-    mp4Url:
-      (media.mp4 && typeof media.mp4 === "object" ? media.mp4.url : media.mp4) ||
-      (d.mp4     && typeof d.mp4     === "object" ? d.mp4.url     : d.mp4)     ||
-      d.videoUrl || d.video || null,
-    mp3Url:
-      (media.mp3 && typeof media.mp3 === "object" ? media.mp3.url : media.mp3) ||
-      (d.mp3     && typeof d.mp3     === "object" ? d.mp3.url     : d.mp3)     ||
-      d.audioUrl || d.audio || null,
-    shortUrl: d.short_url || d.url || info.short_url || "",
-    category: d.category  || info.category || ""
+    title:     d.title     || d.info?.title     || "بدون عنوان",
+    author:    d.author    || d.info?.author    || d.channel || "",
+    thumbnail: d.thumbnail || d.info?.thumbnail || null,
+    duration:  d.duration  || d.info?.duration  || "",
+    views:     d.views     || d.info?.views     || 0,
+    mp4Url:    getUrl(m.mp4)  || getUrl(d.mp4)  || getUrl(d.videoUrl) || null,
+    mp3Url:    getUrl(m.mp3)  || getUrl(d.mp3)  || getUrl(d.audioUrl) || null,
+    shortUrl:  d.short_url || d.url || "",
+    category:  d.category  || ""
   };
 }
 
