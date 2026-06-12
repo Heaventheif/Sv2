@@ -5,7 +5,6 @@
 process.on("uncaughtException", (err) => {
   if (err.code === "EPIPE" || err.code === "ECONNRESET" || err.code === "ETIMEDOUT") return;
   console.error("[uncaughtException]", err.message);
-  global.discordLog?.error("uncaughtException", err.stack || err.message);
 });
 process.on("unhandledRejection", (reason) => {
   const msg = reason?.message || String(reason);
@@ -44,48 +43,6 @@ global.log = {
   warn:    msg => console.log(chalk.yellow("[WARN]"),  msg),
   error:   msg => console.log(chalk.red("[ERROR]"),    msg),
   success: msg => console.log(chalk.green("[SUCCESS]"), msg),
-};
-
-// ─── Discord Webhook Logger ───────────────────────────────────
-// ضع رابط webhook في DISCORD_LOG_WEBHOOK
-// يرسل فقط الأخطاء المهمة لتجنب الـ spam
-const DISCORD_WEBHOOK = process.env.DISCORD_LOG_WEBHOOK || null;
-let _lastDiscordLog = 0;
-const DISCORD_RATELIMIT = 3000; // لا ترسل أكثر من رسالة كل 3 ثوان
-
-async function sendDiscordLog(level, title, description, color = 0xff0000) {
-  if (!DISCORD_WEBHOOK) return;
-  const now = Date.now();
-  if (now - _lastDiscordLog < DISCORD_RATELIMIT) return;
-  _lastDiscordLog = now;
-  try {
-    const { default: https } = await Promise.resolve({ default: require("https") });
-    const body = JSON.stringify({
-      embeds: [{
-        title:       `${level} ${title}`,
-        description: ("```\n" + String(description).substring(0, 1000) + "\n```"),
-        color,
-        timestamp:   new Date().toISOString(),
-        footer: { text: `${global.config.botName || "Bot"} • Render` }
-      }]
-    });
-    const url = new URL(DISCORD_WEBHOOK);
-    const req = https.request({
-      hostname: url.hostname, path: url.pathname + url.search,
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }
-    });
-    req.on("error", () => {});
-    req.write(body);
-    req.end();
-  } catch (_) {}
-}
-
-global.discordLog = {
-  error:   (title, desc) => sendDiscordLog("🔴", title, desc, 0xff0000),
-  warn:    (title, desc) => sendDiscordLog("🟡", title, desc, 0xffa500),
-  success: (title, desc) => sendDiscordLog("🟢", title, desc, 0x00ff00),
-  info:    (title, desc) => sendDiscordLog("🔵", title, desc, 0x0099ff),
 };
 
 // ─── Paths ───────────────────────────────────────────────────
@@ -285,8 +242,8 @@ const handleMessage = async (api, event) => {
             return new Promise((resolve) => {
               api.sendMessage(t, threadID, (err, info) => {
                 if (cb) cb(err, info);
-                resolve(info);
-              }, messageID);
+                resolve(info || {});
+              });
             });
           },
           unsend: (msgID) => {
@@ -334,8 +291,8 @@ const handleMessage = async (api, event) => {
           return new Promise((resolve) => {
             api.sendMessage(t, threadID, (err, info) => {
               if (cb) cb(err, info);
-              resolve(info);
-            }, messageID);
+              resolve(info || {});
+            });
           });
         },
         unsend: (msgID) => {
@@ -353,7 +310,6 @@ const handleMessage = async (api, event) => {
     else if (command.execute) await command.execute(api, event, args, global.commands, "", global.config.admins, global.appState, t => api.sendMessage(t, threadID, null, messageID), global.usersData, global.globalData);
   } catch (err) {
     console.error(`[CMD ERR] ${commandName}:`, err.message);
-    global.discordLog?.error(`CMD ERR: ${commandName}`, err.stack || err.message);
     api.sendMessage(`❌ خطأ: ${err.message?.substring(0, 100)}`, threadID, null, messageID);
   }
 };
@@ -455,26 +411,6 @@ function startWebServer() {
   });
 
   global.expressApp = app;
-
-  // ─── Keep-Alive: ping نفسه كل 14 دقيقة لمنع النوم على render المجاني ──
-  const SELF_URL = process.env.RENDER_EXTERNAL_URL || "https://sv2-nzbg.onrender.com";
-  setInterval(async () => {
-    try {
-      const http  = SELF_URL.startsWith("https") ? require("https") : require("http");
-      await new Promise((resolve, reject) => {
-        const req = http.get(`${SELF_URL}/health`, (res) => {
-          console.log(chalk.cyan(`[PING] ✅ keep-alive → ${res.statusCode}`));
-      // لا نرسل ping success لـ Discord لتجنب الـ spam
-          resolve();
-        });
-        req.on("error", reject);
-        req.setTimeout(10000, () => { req.destroy(); reject(new Error("timeout")); });
-      });
-    } catch (e) {
-      console.warn(chalk.yellow(`[PING] ⚠️ فشل keep-alive: ${e.message}`));
-      global.discordLog?.warn("Keep-Alive Failed", e.message);
-    }
-  }, 14 * 60 * 1000); // كل 14 دقيقة
 }
 
 // ─── DB ──────────────────────────────────────────────────────
@@ -504,11 +440,7 @@ const startBot = async () => {
   }
 
   login({ appState: global.appState }, (err, api) => {
-    if (err) {
-      console.error("[FATAL] Login failed:", err);
-      global.discordLog?.error("FATAL: Login Failed", String(err));
-      process.exit(1);
-    }
+    if (err) { console.error("[FATAL] Login failed:", err); process.exit(1); }
 
     api.setOptions({
       forceLogin:      true,
@@ -562,35 +494,16 @@ const startBot = async () => {
       sessionGuard.init(api, {
         onSuspended: (msg) => {
           console.error("[SESSION] 🔴 الجلسة معلقة:", msg);
+          // أخطر المشرف إذا كان botApi لا يزال يعمل
           const adminId = global.config.admins?.[0];
           if (adminId) {
-            try { global.botApi?.sendMessage(
-              "⚠️ الجلسة انتهت — جارٍ إعادة تسجيل الدخول تلقائياً...",
+            api.sendMessage(
+              "⚠️ تحذير: الجلسة معلقة أو منتهية!\nيرجى تجديد الـ appstate.",
               adminId
-            ); } catch (_) {}
-          }
-        },
-        onRestored: (newApi) => {
-          console.log(chalk.green("[SESSION] ✅ الجلسة استُعيدت — إعادة تشغيل المستمع"));
-          // أعد تشغيل المستمع بالـ api الجديد
-          startListening(newApi);
-          const adminId = global.config.admins?.[0];
-          if (adminId) {
-            try { newApi.sendMessage("✅ تم تجديد الجلسة تلقائياً بنجاح!", adminId); } catch (_) {}
-          }
-        },
-        onFailed: () => {
-          console.error(chalk.red("[SESSION] ❌ فشل تجديد الجلسة — يرجى تحديث appstate يدوياً"));
-          const adminId = global.config.admins?.[0];
-          if (adminId) {
-            try { global.botApi?.sendMessage(
-              "❌ فشل تجديد الجلسة تلقائياً.\nيرجى تحديث APPSTATE يدوياً.",
-              adminId
-            ); } catch (_) {}
+            ).catch(() => {});
           }
         }
       });
-      console.log(chalk.green("[SESSION] 🛡️ session-guard مُفعَّل"));
     } catch (e) {
       console.warn("[SESSION] ⚠️ session-guard غير متاح:", e.message);
     }
