@@ -411,6 +411,24 @@ function startWebServer() {
   });
 
   global.expressApp = app;
+
+  // ─── Keep-Alive: بنغ ذاتي كل 10 دقائق لمنع Render من النوم ────
+  const externalUrl = process.env.RENDER_EXTERNAL_URL;
+  if (externalUrl) {
+    setInterval(() => {
+      const url = externalUrl.replace(/\/$/, "") + "/health";
+      const mod = url.startsWith("https") ? require("https") : require("http");
+      const req = mod.get(url, (r) => {
+        r.resume(); // تفريغ البيانات لإغلاق الاتصال بنجاح
+        if (r.statusCode !== 200) console.warn("[KEEP-ALIVE] ⚠️ status:", r.statusCode);
+      });
+      req.on("error", (e) => console.warn("[KEEP-ALIVE] ⚠️ خطأ:", e.message));
+      req.setTimeout(20000, () => req.destroy());
+    }, 10 * 60 * 1000);
+    console.log(chalk.cyan(`[KEEP-ALIVE] ✅ بنغ ذاتي مفعّل لـ ${externalUrl}`));
+  } else {
+    console.warn(chalk.yellow("[KEEP-ALIVE] ⚠️ RENDER_EXTERNAL_URL غير مضبوط — البوت قد ينام بعد 15 دقيقة خمول (Free Plan)"));
+  }
 }
 
 // ─── DB ──────────────────────────────────────────────────────
