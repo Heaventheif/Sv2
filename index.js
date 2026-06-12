@@ -276,13 +276,21 @@ const handleMessage = async (api, event) => {
 
 // ─── Event Handler ────────────────────────────────────────────
 const handleEvent = async (api, event) => {
+  // ━━━ إصلاح السبب الأول للتنفيذ المزدوج ━━━━━━━━━━━━━━━━━━━━
+  // إذا كانت الرسالة تبدأ بكلمة تُطابق أمراً معروفاً في global.commands،
+  // فسيُعالجه handleMessage عبر onStart — نتجنب استدعاء onChat لنفس الأمر
+  const firstWord = event.body?.trim().split(/ +/)[0]?.toLowerCase();
+
   for (const cmd of global.eventCommands) {
     try {
-      // onChat يعمل فقط على رسائل حقيقية تحمل body و messageID
-      // أحداث log/event/typ لا تحمل messageID فتُسبب خطأ setMessageReaction
       if (cmd.onChat) {
         const hasAtt = (event.attachments?.length > 0);
         if (!event.messageID || (!event.body && !hasAtt)) continue;
+
+        // ← الإصلاح: تجاهل onChat إذا كان هذا الأمر بعينه هو المطابق للكلمة الأولى
+        // هذا يمنع تنفيذ الأمر مرة بـ onChat ومرة أخرى بـ onStart
+        if (firstWord && global.commands.get(firstWord) === cmd) continue;
+
         await cmd.onChat({
           api, event,
           message: { reply: t => api.sendMessage(t, event.threadID, null, event.messageID) }
@@ -294,10 +302,17 @@ const handleEvent = async (api, event) => {
 
 // ─── MQTT Listener ────────────────────────────────────────────
 const startListening = (api) => {
-  let attempts = 0;
+  let attempts       = 0;
+  let listenerActive = false; // ← إصلاح السبب الثاني: يمنع تراكم المستمعين
+
   const listen = () => {
+    // ← إذا كان هناك مستمع نشط بالفعل، لا ننشئ آخر
+    if (listenerActive) return;
+    listenerActive = true;
+
     api.listenMqtt(async (err, event) => {
       if (err) {
+        listenerActive = false; // ← نُعلن أن المستمع انتهى قبل إنشاء واحد جديد
         attempts++;
         console.error(chalk.red(`[MQTT] خطأ (${attempts}):`, err.message));
         return setTimeout(listen, Math.min(5000 * attempts, 30000));
