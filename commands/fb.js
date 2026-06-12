@@ -107,30 +107,22 @@ module.exports = {
   },
 
   // ─── كشف تلقائي لروابط فيسبوك ───────────────────────────────
-  onChat: async ({ api, event, message }) => {
-    // 1) رابط في نص الرسالة
-    let fbUrl = extractFbUrl(event.body);
+  onChat: async ({ api, event }) => {
+    let fbUrl = null;
 
-    // 2) مشاركة Reels/فيديو مباشرة (زر Share) — الرابط في الـ attachment أو في shareUrl
-    if (!fbUrl) {
-      for (const att of (event.attachments || [])) {
-        const candidate =
-          att.url         ||
-          att.previewUrl  ||
-          att.shareUrl    ||
-          att.source      || "";
-        fbUrl = extractFbUrl(candidate);
-        if (fbUrl) break;
-      }
+    // 1) attachment من نوع share (زر Share من Reels/فيديو) — att.url مباشرة
+    for (const att of (event.attachments || [])) {
+      if (att.type === "share" && att.url) { fbUrl = att.url; break; }
     }
 
-    // 3) فحص messageReply إذا شارك رسالة تحتوي رابط
-    if (!fbUrl && event.messageReply?.body) {
-      fbUrl = extractFbUrl(event.messageReply.body);
-    }
+    // 2) رابط في نص الرسالة
+    if (!fbUrl) fbUrl = extractFbUrl(event.body);
+
+    // 3) رسالة مُعاد توجيهها
+    if (!fbUrl && event.messageReply?.body) fbUrl = extractFbUrl(event.messageReply.body);
 
     if (!fbUrl) return;
-    await downloadAndSend(api, event, fbUrl, "360p");
+    await downloadAndSend(api, event, fbUrl, "worst");
   },
 
   // ─── أمر يدوي ─────────────────────────────────────────────
@@ -144,7 +136,7 @@ module.exports = {
 
     const wantHD  = args[0].toLowerCase() === "hd";
     const url     = wantHD ? args[1] : args[0];
-    const quality = wantHD ? "720p" : "360p";
+    const quality = wantHD ? "720p" : "worst";
 
     if (!url) return message.reply("❌ أرسل الرابط بعد hd.");
 
