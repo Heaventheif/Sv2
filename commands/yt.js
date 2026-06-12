@@ -41,7 +41,7 @@ function safeUnsend(message, wait) {
 
 // ─── v2: جلب روابط التحميل ────────────────────────────────────
 async function v2(query) {
-  const res  = await axios.get(`${BASE}/v2/q`, { params: { "": query }, timeout: 30000 });
+  const res  = await axios.get(`${BASE}/v2/q`, { params: { q: query }, timeout: 30000 });
   const data = res.data;
   if (Array.isArray(data)) return data[0] || {};
   if (!data || typeof data !== "object") return {};
@@ -50,7 +50,7 @@ async function v2(query) {
 
 // ─── v3: بحث وإعادة قائمة ────────────────────────────────────
 async function v3(query, limit = 8) {
-  const res  = await axios.get(`${BASE}/v3/q`, { params: { "": query, " ": limit }, timeout: 25000 });
+  const res  = await axios.get(`${BASE}/v3/q`, { params: { q: query, limit }, timeout: 25000 });
   const data = res.data;
   if (Array.isArray(data))           return { results: data };
   if (!data || typeof data !== "object") return { results: [] };
