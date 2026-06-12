@@ -413,7 +413,7 @@ function startWebServer() {
   global.expressApp = app;
 
   // ─── Keep-Alive: ping نفسه كل 14 دقيقة لمنع النوم على render المجاني ──
-  const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+  const SELF_URL = process.env.RENDER_EXTERNAL_URL || "https://sv2-nzbg.onrender.com";
   setInterval(async () => {
     try {
       const http  = SELF_URL.startsWith("https") ? require("https") : require("http");
