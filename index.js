@@ -1,6 +1,17 @@
 /* jshint esversion: 11 */
 "use strict";
 
+// ─── منع EPIPE وأخطاء الشبكة من إسقاط البوت ─────────────────
+process.on("uncaughtException", (err) => {
+  if (err.code === "EPIPE" || err.code === "ECONNRESET" || err.code === "ETIMEDOUT") return;
+  console.error("[uncaughtException]", err.message);
+});
+process.on("unhandledRejection", (reason) => {
+  const msg = reason?.message || String(reason);
+  if (msg.includes("EPIPE") || msg.includes("ECONNRESET") || msg.includes("ETIMEDOUT")) return;
+  console.error("[unhandledRejection]", msg);
+});
+
 // ─── Globals الضرورية فقط ────────────────────────────────────
 global.threadState      = { active: new Map(), approved: new Map(), pending: new Map() };
 global.client           = { reactionListener: {}, globalData: new Map() };
