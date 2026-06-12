@@ -333,7 +333,12 @@ const handleEvent = async (api, event) => {
 
         await cmd.onChat({
           api, event,
-          message: { reply: t => api.sendMessage(t, event.threadID, null, event.messageID) }
+          message: {
+            reply: (t, cb) => new Promise(res =>
+              api.sendMessage(t, event.threadID, (e, i) => { if (cb) cb(e, i); res(i || {}); }, event.messageID)
+            ),
+            unsend: (msgID) => { try { api.unsendMessage(msgID, () => {}); } catch (_) {} }
+          }
         });
       }
     } catch (_) {}
