@@ -411,6 +411,24 @@ function startWebServer() {
   });
 
   global.expressApp = app;
+
+  // ─── Keep-Alive: ping نفسه كل 14 دقيقة لمنع النوم على render المجاني ──
+  const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+  setInterval(async () => {
+    try {
+      const http  = SELF_URL.startsWith("https") ? require("https") : require("http");
+      await new Promise((resolve, reject) => {
+        const req = http.get(`${SELF_URL}/health`, (res) => {
+          console.log(chalk.cyan(`[PING] ✅ keep-alive → ${res.statusCode}`));
+          resolve();
+        });
+        req.on("error", reject);
+        req.setTimeout(10000, () => { req.destroy(); reject(new Error("timeout")); });
+      });
+    } catch (e) {
+      console.warn(chalk.yellow(`[PING] ⚠️ فشل keep-alive: ${e.message}`));
+    }
+  }, 14 * 60 * 1000); // كل 14 دقيقة
 }
 
 // ─── DB ──────────────────────────────────────────────────────
@@ -494,16 +512,35 @@ const startBot = async () => {
       sessionGuard.init(api, {
         onSuspended: (msg) => {
           console.error("[SESSION] 🔴 الجلسة معلقة:", msg);
-          // أخطر المشرف إذا كان botApi لا يزال يعمل
           const adminId = global.config.admins?.[0];
           if (adminId) {
-            api.sendMessage(
-              "⚠️ تحذير: الجلسة معلقة أو منتهية!\nيرجى تجديد الـ appstate.",
+            try { global.botApi?.sendMessage(
+              "⚠️ الجلسة انتهت — جارٍ إعادة تسجيل الدخول تلقائياً...",
               adminId
-            ).catch(() => {});
+            ); } catch (_) {}
+          }
+        },
+        onRestored: (newApi) => {
+          console.log(chalk.green("[SESSION] ✅ الجلسة استُعيدت — إعادة تشغيل المستمع"));
+          // أعد تشغيل المستمع بالـ api الجديد
+          startListening(newApi);
+          const adminId = global.config.admins?.[0];
+          if (adminId) {
+            try { newApi.sendMessage("✅ تم تجديد الجلسة تلقائياً بنجاح!", adminId); } catch (_) {}
+          }
+        },
+        onFailed: () => {
+          console.error(chalk.red("[SESSION] ❌ فشل تجديد الجلسة — يرجى تحديث appstate يدوياً"));
+          const adminId = global.config.admins?.[0];
+          if (adminId) {
+            try { global.botApi?.sendMessage(
+              "❌ فشل تجديد الجلسة تلقائياً.\nيرجى تحديث APPSTATE يدوياً.",
+              adminId
+            ); } catch (_) {}
           }
         }
       });
+      console.log(chalk.green("[SESSION] 🛡️ session-guard مُفعَّل"));
     } catch (e) {
       console.warn("[SESSION] ⚠️ session-guard غير متاح:", e.message);
     }
