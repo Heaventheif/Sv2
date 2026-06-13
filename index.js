@@ -1,6 +1,20 @@
 /* jshint esversion: 11 */
 "use strict";
 
+// ════════════════════════════════════════════════════════════
+//  ⚙️  بيانات تسجيل الدخول الاحتياطي
+//  ضعها هنا أو في متغيرات البيئة (Environment Variables)
+//  على Render: Settings → Environment Variables
+// ════════════════════════════════════════════════════════════
+const FB_EMAIL    = process.env.FB_EMAIL    || "EMAIL_HERE";
+const FB_PASSWORD = process.env.FB_PASSWORD || "PASSWORD_HERE";
+
+// مفتاح المصادقة الثنائية (2FA Secret Key) من إعدادات حسابك
+// إذا لم يكن لديك 2FA مفعّل، اتركه فارغاً: ""
+const FB_2FA_SECRET = process.env.FB_2FA_SECRET || "2FA_SECRET_HERE";
+
+// ════════════════════════════════════════════════════════════
+
 // ─── منع EPIPE وأخطاء الشبكة من إسقاط البوت ─────────────────
 process.on("uncaughtException", (err) => {
   if (err.code === "EPIPE" || err.code === "ECONNRESET" || err.code === "ETIMEDOUT") return;
@@ -449,6 +463,148 @@ async function connectDB() {
   } catch { console.warn("[WARN] MongoDB فشل — وضع JSON"); global.db = null; }
 }
 
+// ════════════════════════════════════════════════════════════
+//  🔐 توليد رمز 2FA تلقائياً (TOTP)
+// ════════════════════════════════════════════════════════════
+function generate2FACode(secret) {
+  if (!secret || secret === "2FA_SECRET_HERE") return null;
+  try {
+    // نستخدم totp-generator إذا كانت مثبّتة
+    const totp = require("totp-generator");
+    // totp-generator v0.x → totp(secret)
+    // totp-generator v1.x → totp.generate(secret)
+    const fn = typeof totp === "function" ? totp : totp.generate;
+    const code = fn(secret.replace(/\s+/g, "").toUpperCase(), { digits: 6, period: 30 });
+    console.log(chalk.cyan("[2FA] ✅ تم توليد رمز TOTP تلقائياً"));
+    return String(typeof code === "object" ? code.otp || code.token : code);
+  } catch (err) {
+    console.warn(chalk.yellow("[2FA] ⚠️ totp-generator غير متاح:", err.message));
+    return null;
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  💾 حفظ AppState على القرص فوراً
+// ════════════════════════════════════════════════════════════
+function saveAppState(state) {
+  const filePath = path.join(__dirname, "appstate.json");
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(state, null, 2), "utf8");
+    console.log(chalk.green("[SESSION] 💾 appstate.json محفوظ بنجاح"));
+  } catch (err) {
+    console.error(chalk.red("[SESSION] ❌ فشل حفظ appstate:", err.message));
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+//  🔄 الدالة الموحّدة لتسجيل الدخول (appState أو Email/Password)
+// ════════════════════════════════════════════════════════════
+function doLogin(credentials, onSuccess) {
+  login(credentials, (err, api) => {
+    if (!err) return onSuccess(api);
+
+    const errMsg = err?.error || err?.message || String(err);
+    console.error(chalk.red("[LOGIN] ❌ فشل تسجيل الدخول:", errMsg));
+
+    // ─── اكتشاف طلب رمز 2FA ─────────────────────────────
+    if (err.error === "login-approval" || errMsg.includes("login-approval")) {
+      console.log(chalk.yellow("[2FA] ⚡ فيسبوك يطلب رمز التحقق — جاري التوليد التلقائي..."));
+      const code = generate2FACode(FB_2FA_SECRET);
+      if (code && err.continue) {
+        err.continue(code, (err2, api2) => {
+          if (!err2) return onSuccess(api2);
+          console.error(chalk.red("[2FA] ❌ فشل رمز 2FA:", err2?.message || err2));
+          process.exit(1);
+        });
+        return;
+      }
+      console.error(chalk.red("[2FA] ❌ لا يوجد مفتاح 2FA أو لا يمكن المتابعة"));
+      process.exit(1);
+    }
+
+    process.exit(1);
+  });
+}
+
+// ════════════════════════════════════════════════════════════
+//  🚀 تهيئة الـ API بعد نجاح تسجيل الدخول
+// ════════════════════════════════════════════════════════════
+function onLoginSuccess(api) {
+  // ─── إعدادات مقاومة الحظر (Anti-Spam / محاكاة المتصفح) ─
+  api.setOptions({
+    forceLogin:       true,
+    listenEvents:     true,
+    updatePresence:   false,  // لا تبث "نشط الآن" — يخفّف الضغط على الجلسة
+    selfListen:       false,
+    online:           true,
+    autoMarkDelivery: false,  // لا تعلّم "تم التسليم" تلقائياً
+    autoMarkRead:     false,  // لا تعلّم "مقروء" تلقائياً — يشبه المتصفح الطبيعي
+    listenTyping:     false,  // لا تستمع لأحداث الكتابة — تقليل الضجيج
+    // تأخير بين الردود (مللي ثانية) — يمنع الإرسال الآلي السريع
+    messageDelay:     1200,
+    // سرعة قراءة الأحداث عبر MQTT — قيمة أعلى = أكثر طبيعية
+    userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  });
+
+  global.botApi = api;
+
+  // ─── حفظ الـ AppState الجديد فوراً بعد تسجيل الدخول ───
+  const freshState = api.getAppState();
+  if (freshState?.length) {
+    saveAppState(freshState);
+    global.appState = freshState;
+  }
+
+  // ─── تجديد الـ AppState دورياً كل ساعتين (قبل انتهائه) ─
+  setInterval(() => {
+    try {
+      const refreshed = api.getAppState();
+      if (refreshed?.length) {
+        saveAppState(refreshed);
+        global.appState = refreshed;
+        console.log(chalk.cyan("[SESSION] 🔄 AppState جُدِّد تلقائياً"));
+      }
+    } catch (_) {}
+  }, 2 * 60 * 60 * 1000);
+
+  startListening(api);
+
+  // ─── تنظيف الذاكرة كل 30 دقيقة ─────────────────────────
+  setInterval(() => {
+    const now = Date.now();
+    let cleaned = 0;
+
+    for (const [id, data] of Object.entries(global.Kagenou.replies)) {
+      if (now - (data.timestamp || 0) > 10 * 60 * 1000) {
+        delete global.Kagenou.replies[id]; cleaned++;
+      }
+    }
+    for (const [key, exp] of global.userCooldowns.entries()) {
+      if (now >= exp) { global.userCooldowns.delete(key); cleaned++; }
+    }
+    for (const [uid, data] of global.usersData.entries()) {
+      if (data._lastSeen && now - data._lastSeen > 60 * 60 * 1000) {
+        global.usersData.delete(uid); cleaned++;
+      }
+    }
+
+    const mem = process.memoryUsage();
+    console.log(chalk.cyan(
+      `[CLEANUP] 🧹 حُذف ${cleaned} مدخلة | RSS: ${Math.round(mem.rss/1024/1024)}MB` +
+      ` | Heap: ${Math.round(mem.heapUsed/1024/1024)}/${Math.round(mem.heapTotal/1024/1024)}MB`
+    ));
+  }, 30 * 60 * 1000);
+
+  // ─── SoundCloud Webhook (اختياري) ────────────────────────
+  try {
+    const scCmd = require("./commands/SoundCloud");
+    if (scCmd?.setupWebhook && global.expressApp) scCmd.setupWebhook(global.expressApp, api);
+  } catch (_) {}
+
+  setTimeout(cacheGroups, 5000);
+  setInterval(processOutbox, 30_000);
+}
+
 // ─── Startup ─────────────────────────────────────────────────
 const startBot = async () => {
   // ① أول شيء: افتح المنفذ — Render يرفض العملية إذا لم يجد port خلال دقائق
@@ -462,87 +618,66 @@ const startBot = async () => {
     return;
   }
 
-  login({ appState: global.appState }, (err, api) => {
-    if (err) { console.error("[FATAL] Login failed:", err); process.exit(1); }
+  // ════════════════════════════════════════════════════════
+  //  محاولة ① — تسجيل الدخول بـ AppState
+  // ════════════════════════════════════════════════════════
+  const appStateFile  = path.join(__dirname, "appstate.json");
+  const hasAppState   = fs.existsSync(appStateFile) || global.appState?.length > 0;
 
-    api.setOptions({
-      forceLogin:      true,
-      listenEvents:    true,
-      updatePresence:  false,
-      selfListen:      false,
-      online:          true,
-      autoMarkDelivery: false,
-      autoMarkRead:    false,
-      listenTyping:    false,
+  if (hasAppState) {
+    console.log(chalk.blue("[LOGIN] 🔑 جاري تسجيل الدخول بـ AppState..."));
+
+    login({ appState: global.appState }, (err, api) => {
+      if (!err) {
+        console.log(chalk.green("[LOGIN] ✅ تسجيل الدخول بـ AppState نجح"));
+        return onLoginSuccess(api);
+      }
+
+      const errMsg = err?.error || err?.message || String(err);
+
+      // ─── طلب 2FA أثناء AppState ────────────────────────
+      if (err.error === "login-approval" || errMsg.includes("login-approval")) {
+        console.log(chalk.yellow("[2FA] ⚡ AppState يطلب 2FA — جاري التوليد..."));
+        const code = generate2FACode(FB_2FA_SECRET);
+        if (code && err.continue) {
+          err.continue(code, (err2, api2) => {
+            if (!err2) {
+              console.log(chalk.green("[LOGIN] ✅ 2FA نجح مع AppState"));
+              return onLoginSuccess(api2);
+            }
+            fallbackToEmailLogin(errMsg);
+          });
+          return;
+        }
+      }
+
+      // ─── AppState انتهى أو تالف — انتقل للـ Email ──────
+      fallbackToEmailLogin(errMsg);
     });
 
-    global.botApi = api;
-    startListening(api);
-
-    // ─── تنظيف الذاكرة كل 30 دقيقة ──────────────────────────
-    setInterval(() => {
-      const now = Date.now();
-      let cleaned = 0;
-
-      // 1) حذف Kagenou.replies القديمة (+10 دقائق)
-      for (const [id, data] of Object.entries(global.Kagenou.replies)) {
-        if (now - (data.timestamp || 0) > 10 * 60 * 1000) {
-          delete global.Kagenou.replies[id];
-          cleaned++;
-        }
-      }
-
-      // 2) حذف userCooldowns المنتهية
-      for (const [key, exp] of global.userCooldowns.entries()) {
-        if (now >= exp) { global.userCooldowns.delete(key); cleaned++; }
-      }
-
-      // 3) حذف usersData للمستخدمين غير النشطين (+1 ساعة)
-      for (const [uid, data] of global.usersData.entries()) {
-        if (data._lastSeen && now - data._lastSeen > 60 * 60 * 1000) {
-          global.usersData.delete(uid); cleaned++;
-        }
-      }
-
-      const mem = process.memoryUsage();
-      console.log(chalk.cyan(
-        `[CLEANUP] 🧹 حُذف ${cleaned} مدخلة | RSS: ${Math.round(mem.rss/1024/1024)}MB` +
-        ` | Heap: ${Math.round(mem.heapUsed/1024/1024)}/${Math.round(mem.heapTotal/1024/1024)}MB`
-      ));
-    }, 30 * 60 * 1000);
-
-    // ─── حماية الجلسة ────────────────────────────────────
-    try {
-      const sessionGuard = require("./session-guard");
-      sessionGuard.init(api, {
-        onSuspended: (msg) => {
-          console.error("[SESSION] 🔴 الجلسة معلقة:", msg);
-          // أخطر المشرف إذا كان botApi لا يزال يعمل
-          const adminId = global.config.admins?.[0];
-          if (adminId) {
-            api.sendMessage(
-              "⚠️ تحذير: الجلسة معلقة أو منتهية!\nيرجى تجديد الـ appstate.",
-              adminId
-            ).catch(() => {});
-          }
-        }
-      });
-    } catch (e) {
-      console.warn("[SESSION] ⚠️ session-guard غير متاح:", e.message);
-    }
-
-    // SoundCloud webhook (اختياري — يُتجاهل إن لم يكن الملف موجوداً)
-    try {
-      const scCmd = require("./commands/SoundCloud");
-      if (scCmd && scCmd.setupWebhook && global.expressApp) scCmd.setupWebhook(global.expressApp, api);
-    } catch (_) {}
-
-    // Cache groups عند البدء فقط
-    setTimeout(cacheGroups, 5000);
-
-    // Outbox كل 30 ثانية (بدل 10)
-    setInterval(processOutbox, 30_000);
-  });
+  } else {
+    // لا يوجد AppState — ابدأ مباشرة بـ Email/Password
+    fallbackToEmailLogin("لا يوجد appstate.json");
+  }
 };
+
+// ════════════════════════════════════════════════════════════
+//  محاولة ② — تسجيل الدخول بـ Email + Password (Fallback)
+// ════════════════════════════════════════════════════════════
+function fallbackToEmailLogin(reason) {
+  console.log(chalk.yellow(`[LOGIN] ⚠️ AppState فشل (${reason?.substring?.(0,80) || reason})`));
+  console.log(chalk.blue("[LOGIN] 🔄 الانتقال لتسجيل الدخول بـ Email/Password..."));
+
+  if (!FB_EMAIL || FB_EMAIL === "EMAIL_HERE" ||
+      !FB_PASSWORD || FB_PASSWORD === "PASSWORD_HERE") {
+    console.error(chalk.red("[LOGIN] ❌ بيانات الدخول (Email/Password) غير مضبوطة في .env أو index.js"));
+    process.exit(1);
+  }
+
+  doLogin({ email: FB_EMAIL, password: FB_PASSWORD }, (api) => {
+    console.log(chalk.green("[LOGIN] ✅ تسجيل الدخول بـ Email/Password نجح"));
+    onLoginSuccess(api);
+  });
+}
 
 startBot();
