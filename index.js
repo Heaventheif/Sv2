@@ -364,17 +364,7 @@ function startWebServer() {
 }
 
 // ─── DB ──────────────────────────────────────────────────────
-async function connectDB() {
-  const uri = process.env.MONGO_URI || global.config.mongoUri;
-  if (!uri) { global.db = null; return; }
-  try {
-    const { MongoClient } = require("mongodb");
-    const client = new MongoClient(uri, { serverSelectionTimeoutMS: 5000 });
-    await client.connect();
-    global.db = { db: col => client.db("chatbot_db").collection(col) };
-    console.log(chalk.green("[SUCCESS] MongoDB connected"));
-  } catch { console.warn("[WARN] MongoDB فشل — وضع JSON"); global.db = null; }
-}
+const { connectDB } = require("./db/index");
 
 // ════════════════════════════════════════════════════════════
 //  🔐 توليد رمز 2FA تلقائياً (TOTP)
@@ -508,11 +498,6 @@ function onLoginSuccess(api) {
     ));
   }, 30 * 60 * 1000);
 
-  // ─── SoundCloud Webhook (اختياري) ────────────────────────
-  try {
-    const scCmd = require("./commands/SoundCloud");
-    if (scCmd?.setupWebhook && global.expressApp) scCmd.setupWebhook(global.expressApp, api);
-  } catch (_) {}
 }
 
 // ─── Startup ─────────────────────────────────────────────────
