@@ -100,27 +100,50 @@ async function updateRenderEnv(newAppState) {
   }
 }
 
-// ─── إعادة تسجيل الدخول ──────────────────────────────────────
+// ─── تجديد appstate عبر HF Space (بدون إيميل/باسورد) ──────────
 async function reLogin() {
-  const email    = process.env.FB_EMAIL;
-  const password = process.env.FB_PASSWORD;
+  const hfBase = (process.env.HF_SPACE_URL || "").replace(/\/$/, "");
 
-  if (!email || !password) {
-    log.error("FB_EMAIL أو FB_PASSWORD غير موجودَين — لا يمكن إعادة الدخول");
+  if (!hfBase) {
+    log.error("HF_SPACE_URL غير موجود — لا يمكن تجديد appstate");
+    return null;
+  }
+  if (!global.appState) {
+    log.error("لا يوجد appState حالي لتجديده");
     return null;
   }
 
-  log.info(`🔄 إعادة تسجيل الدخول بـ ${email} ...`);
+  log.info("🔄 محاولة تجديد appstate عبر HF Space (بدون تسجيل دخول جديد)...");
+
+  let newState;
+  try {
+    const { data } = await axios.post(
+      `${hfBase}/refresh-session`,
+      { appstate: global.appState },
+      { timeout: 120000 }
+    );
+    if (data?.error) {
+      log.error(`فشل التجديد: ${data.error}`);
+      return null;
+    }
+    newState = data?.appstate;
+    if (!Array.isArray(newState) || !newState.length) {
+      log.error("رد HF Space لم يحتوِ appstate صالح");
+      return null;
+    }
+  } catch (e) {
+    log.error(`فشل الاتصال بـ HF Space: ${e.response?.data?.error || e.message}`);
+    return null;
+  }
 
   return new Promise((resolve) => {
-    login({ email, password }, async (err, newApi) => {
+    login({ appState: newState }, async (err, newApi) => {
       if (err) {
-        log.error(`فشل تسجيل الدخول: ${err.message || err}`);
+        log.error(`فشل تسجيل الدخول بالـ appstate الجديد: ${err.message || err}`);
         return resolve(null);
       }
 
-      const newState = newApi.getAppState();
-      log.ok("✅ تم تسجيل الدخول بنجاح — جلسة جديدة");
+      log.ok("✅ تم تجديد الجلسة بنجاح");
 
       // احفظ محلياً
       try {
