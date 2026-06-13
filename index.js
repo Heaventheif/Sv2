@@ -40,8 +40,6 @@ global.eventCommands    = [];
 global.appState         = {};
 global.threadConfigs    = new Map();
 global.botApi           = null;
-global.maintenanceMode  = false;
-global.disabledGroups   = {};
 
 const fs      = require("fs-extra");
 const path    = require("path");
@@ -59,22 +57,6 @@ global.log = {
   success: msg => console.log(chalk.green("[SUCCESS]"), msg),
 };
 
-// ─── Paths ───────────────────────────────────────────────────
-const DASHBOARD_DATA       = path.join(__dirname, "dashboard", "data");
-const DISABLED_GROUPS_PATH = path.join(DASHBOARD_DATA, "disabled-groups.json");
-const GROUPS_CACHE_PATH    = path.join(DASHBOARD_DATA, "groups-cache.json");
-const OUTBOX_PATH          = path.join(DASHBOARD_DATA, "outbox.json");
-
-// ─── JSON helpers ────────────────────────────────────────────
-function readJson(fp, fallback = null) {
-  try { return JSON.parse(fs.readFileSync(fp, "utf-8")); } catch { return fallback; }
-}
-function writeJson(fp, data) {
-  try {
-    fs.mkdirSync(path.dirname(fp), { recursive: true });
-    fs.writeFileSync(fp, JSON.stringify(data, null, 2), "utf-8");
-  } catch (e) { console.warn("[DB] فشل الكتابة:", e.message); }
-}
 
 // ─── Helpers ─────────────────────────────────────────────────
 global.getPrefix = tID => global.threadConfigs.get(tID)?.prefix || global.config.Prefix[0];
@@ -151,89 +133,20 @@ const loadCommands = () => {
 global.reloadCommands = loadCommands;
 
 // ─── AppState ────────────────────────────────────────────────
-let dashboardOnly = false;
 try {
   const p = path.join(__dirname, "appstate.json");
   if (fs.existsSync(p)) {
     global.appState = JSON.parse(fs.readFileSync(p, "utf8"));
   } else if (process.env.APPSTATE || process.env.APPSTATE_BOT1) {
     global.appState = JSON.parse(process.env.APPSTATE || process.env.APPSTATE_BOT1);
-  } else {
-    dashboardOnly = true;
   }
-} catch { dashboardOnly = true; }
-
-// ─── Group Disabled Check (كاش في الذاكرة — بدل قراءة disk كل رسالة) ────
-let _disabledCache = {};
-let _disabledCacheLoaded = false;
-function refreshDisabledCache() {
-  _disabledCache = readJson(DISABLED_GROUPS_PATH, {});
-  _disabledCacheLoaded = true;
-}
-refreshDisabledCache(); // تحميل أولي
-setInterval(refreshDisabledCache, 30_000); // تحديث كل 30 ثانية
-
-function isGroupDisabled(threadID) {
-  if (!_disabledCacheLoaded) refreshDisabledCache();
-  return !!_disabledCache[threadID];
-}
-
-// تحديث الكاش فوراً عند تغيير حالة مجموعة (يستدعيها الداشبورد)
-global.refreshDisabledCache = refreshDisabledCache;
-
-// ─── Outbox (Dashboard → Messenger) ─────────────────────────
-let outboxBusy = false;
-function processOutbox() {
-  if (outboxBusy || !global.botApi) return;
-  const outbox  = readJson(OUTBOX_PATH, []);
-  const pending = outbox.filter(e => e.status === "pending");
-  if (!pending.length) return;
-  outboxBusy = true;
-  (async () => {
-    const updated = outbox.map(e => ({ ...e }));
-    for (const entry of updated) {
-      if (entry.status !== "pending") continue;
-      entry.status = "sending";
-      for (const tid of (entry.threadIDs || [])) {
-        try {
-          await new Promise((res, rej) =>
-            global.botApi.sendMessage(entry.message, tid, err => err ? rej(err) : res())
-          );
-          await new Promise(r => setTimeout(r, 600));
-        } catch (e) { console.warn("[Outbox] فشل:", tid, e.message); }
-      }
-      entry.status = "sent";
-      entry.sentAt = new Date().toISOString();
-    }
-    writeJson(OUTBOX_PATH, updated.filter(e => e.status !== "sent"));
-    outboxBusy = false;
-  })().catch(() => { outboxBusy = false; });
-}
-
-// ─── Groups Cache ────────────────────────────────────────────
-function cacheGroups() {
-  if (!global.botApi) return;
-  global.botApi.getThreadList(30, null, ["INBOX"], (err, threads) => {
-    if (err || !threads) return;
-    const cache = readJson(GROUPS_CACHE_PATH, {});
-    for (const t of threads) {
-      if (!t.isGroup) continue;
-      cache[t.threadID] = {
-        name: t.name || `مجموعة ${t.threadID.slice(-6)}`,
-        participantCount: t.participantIDs?.length || 0,
-        lastSeen: new Date().toISOString(),
-      };
-    }
-    writeJson(GROUPS_CACHE_PATH, cache);
-  });
-}
+} catch { }
 
 // ─── Message Handler ─────────────────────────────────────────
 const handleMessage = async (api, event) => {
   const { threadID, senderID, body, messageReply, messageID } = event;
   const hasAttachment = (event.attachments?.length > 0);
   if (!body?.trim() && !hasAttachment) return;
-  if (isGroupDisabled(threadID)) return;
 
   const messageText = body.trim();
 
@@ -600,9 +513,6 @@ function onLoginSuccess(api) {
     const scCmd = require("./commands/SoundCloud");
     if (scCmd?.setupWebhook && global.expressApp) scCmd.setupWebhook(global.expressApp, api);
   } catch (_) {}
-
-  setTimeout(cacheGroups, 5000);
-  setInterval(processOutbox, 30_000);
 }
 
 // ─── Startup ─────────────────────────────────────────────────
@@ -612,11 +522,6 @@ const startBot = async () => {
 
   await connectDB();
   loadCommands();
-
-  if (dashboardOnly) {
-    console.log("[BOT] وضع الداشبورد فقط");
-    return;
-  }
 
   // ════════════════════════════════════════════════════════
   //  محاولة ① — تسجيل الدخول بـ AppState
