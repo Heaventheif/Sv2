@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+playwright
+httpx
+requests
+beautifulsoup4
+lxml
+python-dotenv
+pydantic
+chess
+curl_cffi
+rebrowser-playwright
+huggingface_hub
