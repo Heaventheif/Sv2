@@ -82,11 +82,11 @@ async function endGame(gameId, winnerId = null) {
 // التواصل مع Hugging Face
 // ═══════════════════════════════════════════════════════════════
 
-async function callChessEngine(fen, move, botMode = false) {
+async function callChessEngine(fen, move, botMode = false, difficulty = 3) {
   if (!HF_CHESS_URL) throw new Error("HF_SCRAPER_URL غير مضبوط في .env");
   const url = `${HF_CHESS_URL.replace(/\/$/, "")}/process_move`;
   const res = await axios.post(url,
-    { fen, move: move || null, bot_mode: botMode },
+    { fen, move: move || null, bot_mode: botMode, difficulty },
     { timeout: CHESS_TIMEOUT, headers: { "Content-Type": "application/json" } }
   );
   return res.data;
@@ -100,6 +100,15 @@ async function callChessEngine(fen, move, botMode = false) {
 // ═══════════════════════════════════════════════════════════════
 
 const STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+
+const DIFFICULTY_LABELS = {
+  1: "1️⃣ مبتدئ جداً",
+  2: "2️⃣ مبتدئ",
+  3: "3️⃣ متوسط",
+  4: "4️⃣ متقدم",
+  5: "5️⃣ صعب جداً",
+};
+const DEFAULT_DIFFICULTY = 3;
 
 function normalizeMove(text) {
   // يقبل "C2 C4" أو "c2c4" أو "c2 c4"
@@ -135,10 +144,18 @@ const CHESS_RULES =
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 
 🚀 بدء لعبة:
-  chess bot     — ضد الذكاء الاصطناعي
+  chess bot     — ضد الذكاء الاصطناعي (مستوى متوسط)
+  chess bot 1..5 — ضد البوت بمستوى صعوبة محدد
   chess @شخص    — تحدي عضو في المجموعة
   ردّ على رسالة + chess — تحدي صاحبها
   ⚡ الألوان تُحدَّد عشوائياً عند البدء
+
+🎯 مستويات صعوبة البوت:
+  1️⃣ مبتدئ جداً — نقلات شبه عشوائية
+  2️⃣ مبتدئ
+  3️⃣ متوسط (افتراضي)
+  4️⃣ متقدم
+  5️⃣ صعب جداً — بدون أي عشوائية
 
 🎮 كيف تكتب النقلة (نظام UCI):
   من أين + إلى أين (بمسافة أو بدونها)
@@ -230,7 +247,7 @@ module.exports = {
     // ─── أرسل لسيرفر HF ────────────────────────────────────
     let result;
     try {
-      result = await callChessEngine(game.fen, move, isBotGame);
+      result = await callChessEngine(game.fen, move, isBotGame, game.difficulty || DEFAULT_DIFFICULTY);
     } catch (err) {
       return api.sendMessage(
         `⚠️ فشل الاتصال بسيرفر الشطرنج\n${err.message?.substring(0, 80)}`,
@@ -318,10 +335,11 @@ module.exports = {
     if (!joinedArgs && !messageReply && !Object.keys(mentions || {}).length) {
       return api.sendMessage(
         "♟️ بوت الشطرنج\n\n" +
-        "  chess bot    — ضد البوت\n" +
-        "  chess @شخص   — ضد لاعب\n" +
-        "  رد + chess   — تحدي صاحب الرسالة\n" +
-        "  chess help   — القواعد والنقلات الخاصة",
+        "  chess bot      — ضد البوت (متوسط)\n" +
+        "  chess bot 1-5  — ضد البوت بمستوى صعوبة\n" +
+        "  chess @شخص     — ضد لاعب\n" +
+        "  رد + chess     — تحدي صاحب الرسالة\n" +
+        "  chess help     — القواعد والنقلات الخاصة",
         threadID, null, messageID
       );
     }
@@ -338,10 +356,14 @@ module.exports = {
     // ─── تحديد المنافس ──────────────────────────────────────
     let opponentID    = null;
     let opponentLabel = "";
+    let difficulty    = DEFAULT_DIFFICULTY;
 
-    if (joinedArgs === "bot" || joinedArgs === "بوت") {
-      opponentID    = "bot";
-      opponentLabel = "🤖 البوت";
+    const botMatch = joinedArgs.match(/^(bot|بوت)(?:\s+([1-5]))?$/);
+
+    if (botMatch) {
+      opponentID = "bot";
+      if (botMatch[2]) difficulty = parseInt(botMatch[2]);
+      opponentLabel = `🤖 البوت (${DIFFICULTY_LABELS[difficulty]})`;
 
     } else if (Object.keys(mentions || {}).length > 0) {
       opponentID    = Object.keys(mentions)[0];
@@ -387,6 +409,7 @@ module.exports = {
       player_black,
       current_turn: first_turn,
       fen: STARTING_FEN,
+      difficulty,
     });
 
     // ─── إذا البوت أبيض → ابدأ بنقلة البوت تلقائياً ────────
@@ -397,7 +420,7 @@ module.exports = {
     if (opponentID === "bot" && player_white === "bot") {
       // البوت أبيض → يلعب النقلة الأولى تلقائياً
       try {
-        const botRes = await callChessEngine(STARTING_FEN, null, true);
+        const botRes = await callChessEngine(STARTING_FEN, null, true, difficulty);
         // null move مع bot_mode=true → البوت يلعب كأبيض
         startFen      = botRes.new_fen;
         startImageB64 = botRes.image_base64;
@@ -451,7 +474,6 @@ module.exports = {
         ? "🤖 البوت سيرد تلقائياً بعد كل نقلتك\n"
         : "") +
       `\n💡 chess help — لمعرفة النقلات الخاصة`;
-
     if (startImageB64) {
       await sendBoardImage(api, threadID, messageID, startImageB64, caption);
     } else {
