@@ -13,6 +13,7 @@ class MoveRequest(BaseModel):
     fen: str
     move: Optional[str] = None
     bot_mode: bool = False
+    difficulty: int = 3
 
 
 class MoveResponse(BaseModel):
@@ -147,13 +148,33 @@ def minimax(board: chess.Board, depth: int, alpha: int, beta: int, maximizing: b
 
 
 # ═══════════════════════════════════════════════════════════════
+# مستويات الصعوبة: (عمق البحث، نطاق الضوضاء العشوائية)
+# ═══════════════════════════════════════════════════════════════
+
+DIFFICULTY_LEVELS = {
+    1: {"depth": 1, "noise": 100},  # مبتدئ جداً
+    2: {"depth": 2, "noise": 50},   # مبتدئ
+    3: {"depth": 3, "noise": 15},   # متوسط (الافتراضي السابق)
+    4: {"depth": 4, "noise": 5},    # متقدم
+    5: {"depth": 5, "noise": 0},    # صعب جداً
+}
+
+DEFAULT_DIFFICULTY = 3
+
+
+def _resolve_difficulty(level: int) -> dict:
+    return DIFFICULTY_LEVELS.get(level, DIFFICULTY_LEVELS[DEFAULT_DIFFICULTY])
+
+
+# ═══════════════════════════════════════════════════════════════
 # المحرك الهجين — الإصلاح الرئيسي هنا
 # ═══════════════════════════════════════════════════════════════
 
-def hybrid_engine(board: chess.Board) -> chess.Move:
+def hybrid_engine(board: chess.Board, difficulty: int = DEFAULT_DIFFICULTY) -> chess.Move:
     """
     محرك هجين Goatv2 + Aurora.
     الإصلاح: نحفظ board.turn قبل push، لا نقرأه بعده.
+    difficulty: 1 (أسهل) إلى 5 (أصعب) — يتحكم في عمق البحث ومقدار الضوضاء.
     """
     legal_moves = list(board.legal_moves)
     if not legal_moves:
@@ -163,17 +184,20 @@ def hybrid_engine(board: chess.Board) -> chess.Move:
     current_color = board.turn
     is_maximizing = (current_color == chess.WHITE)
 
+    level = _resolve_difficulty(difficulty)
+    depth = level["depth"]
+    noise_range = level["noise"]
+
     best_move  = None
     best_score = -math.inf if is_maximizing else math.inf
-    depth      = 3
-    aurora_noise = random.randint(-15, 15)
 
     for move in legal_moves:
         board.push(move)
         # بعد push يصبح دور الخصم → نمرر عكس is_maximizing
         score = minimax(board, depth-1, -math.inf, math.inf, not is_maximizing)
         board.pop()
-        score += aurora_noise
+        if noise_range:
+            score += random.randint(-noise_range, noise_range)
 
         if is_maximizing:
             if score > best_score:
@@ -219,7 +243,7 @@ def fen_to_png_base64(board: chess.Board, last_move: chess.Move = None) -> str:
 # ═══════════════════════════════════════════════════════════════
 
 def apply_move_and_get_response(
-    fen: str, move_uci: Optional[str], bot_mode: bool
+    fen: str, move_uci: Optional[str], bot_mode: bool, difficulty: int = DEFAULT_DIFFICULTY
 ) -> MoveResponse:
     board     = chess.Board(fen)
     last_move = None
@@ -260,7 +284,7 @@ def apply_move_and_get_response(
 
     # ─── نقلة البوت ──────────────────────────────────────────
     if bot_mode:
-        bot_move = hybrid_engine(board)
+        bot_move = hybrid_engine(board, difficulty)
         if bot_move:
             board.push(bot_move)
             last_move = bot_move
