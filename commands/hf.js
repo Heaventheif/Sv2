@@ -8,7 +8,7 @@ const HF_BASE = process.env.HF_SPACE_URL || "";
 const sessionSchema = new mongoose.Schema({
   _id:      String,
   messages: { type: Array, default: [] },
-  model:    { type: String, default: "qwen7" },
+  model:    { type: String, default: "llama4" },
   updatedAt:{ type: Date,   default: Date.now },
 });
 const Session = mongoose.models.HFSession
@@ -16,13 +16,13 @@ const Session = mongoose.models.HFSession
 
 async function loadCtx(id) {
   try {
-    if (!global.db) return { messages: [], model: "qwen7" };
+    if (!global.db) return { messages: [], model: "llama4" };
     const doc = await Session.findById(id).lean();
     return {
       messages: doc?.messages?.slice(-10) || [],
-      model:    doc?.model || "qwen7",
+      model:    doc?.model || "llama4",
     };
-  } catch (_) { return { messages: [], model: "qwen7" }; }
+  } catch (_) { return { messages: [], model: "llama4" }; }
 }
 
 async function saveCtx(id, messages, model) {
@@ -34,6 +34,21 @@ async function saveCtx(id, messages, model) {
       { upsert: true }
     );
   } catch (_) {}
+}
+
+// ─── حذف رسائل التفكير من الرد ───────────────────────────────
+function cleanReply(text) {
+  // حذف وسوم التفكير
+  text = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  text = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, "");
+  text = text.replace(/<analysis>[\s\S]*?<\/analysis>/gi, "");
+  text = text.replace(/<reflection>[\s\S]*?<\/reflection>/gi, "");
+
+  // إذا فيه "الجواب:" → خذ ما بعده فقط
+  const match = text.match(/(?:الجواب|الإجابة|Answer)\s*:\s*/i);
+  if (match) text = text.slice(text.indexOf(match[0]) + match[0].length);
+
+  return text.trim();
 }
 
 // ─── تحميل الوسائط وتحويلها base64 ──────────────────────────
@@ -108,10 +123,7 @@ async function callHF(messages, model) {
   if (data.error) throw new Error(data.error);
   if (!data.reply) throw new Error("استجابة فارغة من الخادم");
 
-  // حذف رسائل التفكير <think>...</think>
-  const reply = data.reply.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
-
-  return { reply, model_used: data.model_used || model };
+  return { reply: cleanReply(data.reply), model_used: data.model_used || model };
 }
 
 // ─── المعالج الرئيسي ─────────────────────────────────────────
@@ -130,31 +142,34 @@ async function handle(api, event, args, registerReply) {
   if (["نماذج", "models", "list"].includes(firstArg)) {
     return api.sendMessage(
       `🤖 النماذج المتاحة في HF AI:\n\n` +
-      `━━━━━ Qwen ━━━━━\n` +
-      `• qwen / qwen72 → Qwen2.5-72B (قوي)\n` +
-      `• qwen7 → Qwen2.5-7B ✅ مجاني\n` +
-      `• qwen3 → Qwen3-235B (ضخم)\n\n` +
-      `━━━━━ Llama ━━━━━\n` +
-      `• llama / llama8 → Llama-3.1-8B ✅ مجاني\n` +
-      `• llama70 → Llama-3.3-70B\n` +
-      `• llama4 → Llama-4-Scout-17B\n\n` +
+      `━━━━━ Llama (Meta) ━━━━━\n` +
+      `• llama4 ← الافتراضي ✅ يدعم الصور\n` +
+      `• llama / llama8 → Llama-3.1-8B ✅\n` +
+      `• llama70 → Llama-3.3-70B\n\n` +
+      `━━━━━ Qwen (Alibaba) ━━━━━\n` +
+      `• qwen7 → Qwen2.5-7B ✅\n` +
+      `• qwen / qwen72 → Qwen2.5-72B\n` +
+      `• qwen3 → Qwen3-235B\n\n` +
       `━━━━━ Mistral ━━━━━\n` +
-      `• mistral → Mistral-7B ✅ مجاني\n` +
-      `• mistral22 → Mistral-Small-22B\n` +
+      `• mistral → Mistral-7B ✅\n` +
+      `• mistral22 → Mistral-Small-22B ✅ يدعم الصور\n` +
       `• mixtral → Mixtral-8x7B\n\n` +
+      `━━━━━ Google ━━━━━\n` +
+      `• gemma → Gemma-3-27B ✅ يدعم الصور\n` +
+      `• gemma4 → Gemma-3-4B ✅ يدعم الصور\n\n` +
       `━━━━━ DeepSeek ━━━━━\n` +
-      `• deepseek7 → DeepSeek-R1-7B ✅ مجاني\n` +
+      `• deepseek7 → DeepSeek-R1-7B ✅\n` +
       `• deepseek → DeepSeek-R1-32B\n\n` +
       `━━━━━ أخرى ━━━━━\n` +
-      `• phi / phi4 → Microsoft Phi ✅ مجاني\n` +
-      `• gemma / gemma4 → Google Gemma ✅ مجاني\n` +
-      `• zephyr → Zephyr-7B ✅ مجاني\n` +
+      `• phi / phi4 → Microsoft Phi ✅\n` +
+      `• zephyr → Zephyr-7B ✅\n` +
       `• command → Cohere Command-R\n\n` +
-      `━━━━━━━━━━━━━━━━\n` +
-      `💡 يمكنك أيضاً إرسال معرّف كامل:\n` +
-      `.hf Qwen/Qwen2.5-72B-Instruct سؤالك\n\n` +
-      `📸 يدعم الصور والوسائط!\n` +
-      `🧹 .hf مسح — لمسح الذاكرة`,
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `📸 النماذج التي تدعم الصور:\n` +
+      `llama4، mistral22، gemma، gemma4\n\n` +
+      `💡 معرّف كامل:\n` +
+      `.hf meta-llama/Llama-4-Scout-17B-16E-Instruct سؤال\n\n` +
+      `🧹 .hf مسح — مسح الذاكرة`,
       threadID, null, messageID
     );
   }
@@ -188,26 +203,23 @@ async function handle(api, event, args, registerReply) {
   // ─── كشف الوسائط ─────────────────────────────────────────
   const attachment = detectAttachment(event);
 
-  // بدون سؤال ولا وسيط
   if (!prompt && !attachment) {
     return api.sendMessage(
       `🤖 HF AI — النموذج الحالي: ${model}\n\n` +
       `📝 الاستخدام:\n` +
       `.hf [نموذج] [سؤالك]\n\n` +
       `💡 أمثلة:\n` +
-      `.hf qwen7 ما هو الذكاء الاصطناعي؟\n` +
-      `.hf llama اشرح لي البرمجة\n` +
-      `.hf mistral كيف تعمل الشبكات؟\n` +
-      `.hf + صورة — تحليل الصورة\n\n` +
+      `.hf ما هو الذكاء الاصطناعي؟  ← llama4 افتراضي\n` +
+      `.hf qwen7 اشرح لي البرمجة\n` +
+      `.hf gemma + صورة — تحليل الصورة\n\n` +
       `📋 .hf نماذج — كل النماذج المتاحة\n` +
       `🧹 .hf مسح — مسح الذاكرة`,
       threadID, null, messageID
     );
   }
 
-  if (!HF_BASE) {
+  if (!HF_BASE)
     return api.sendMessage("❌ HF_SPACE_URL غير مضبوط في متغيرات Render", threadID, null, messageID);
-  }
 
   // مؤشر انتظار
   api.sendMessage(
@@ -269,7 +281,7 @@ async function handle(api, event, args, registerReply) {
   } catch (err) {
     let msg = "❌ خطأ: ";
     if (err.code === "ECONNABORTED" || err.message?.includes("timeout"))
-      msg += "⏱️ انتهت مهلة الاتصال — جرب نموذجاً أصغر مثل: qwen7 أو mistral";
+      msg += "⏱️ انتهت مهلة الاتصال — جرب نموذجاً أصغر مثل: llama أو gemma4";
     else if (err.message?.includes("HF_SPACE_URL"))
       msg += err.message;
     else
@@ -283,38 +295,32 @@ module.exports = {
   config: {
     name:             "hf",
     aliases:          ["huggingface", "hfai"],
-    version:          "3.0.0",
+    version:          "3.1.0",
     author:           "Sunken",
     countDown:        5,
     role:             0,
-    shortDescription: { ar: "ذكاء اصطناعي — أي نموذج من HuggingFace + دعم الصور" },
-    longDescription:  {
+    shortDescription: { ar: "ذكاء اصطناعي — llama4 افتراضي + دعم الصور" },
+    longDescription: {
       ar:
-        "تحدث مع أي نموذج ذكاء اصطناعي من HuggingFace مع دعم الصور والوسائط\n\n" +
-        "النماذج المجانية ✅:\n" +
-        "• qwen7 — Qwen2.5-7B\n" +
+        "تحدث مع أي نموذج من HuggingFace\n" +
+        "النموذج الافتراضي: llama4 (يدعم الصور ✅)\n\n" +
+        "النماذج المجانية:\n" +
+        "• llama4 ← افتراضي، يدعم الصور\n" +
         "• llama / llama8 — Llama-3.1-8B\n" +
+        "• qwen7 — Qwen2.5-7B\n" +
         "• mistral — Mistral-7B\n" +
+        "• gemma / gemma4 — Google Gemma (يدعم الصور)\n" +
+        "• mistral22 — Mistral-Small (يدعم الصور)\n" +
         "• deepseek7 — DeepSeek-R1-7B\n" +
         "• phi / phi4 — Microsoft Phi\n" +
-        "• gemma / gemma4 — Google Gemma\n" +
-        "• zephyr — Zephyr-7B\n\n" +
-        "نماذج أقوى (تحتاج HF PRO):\n" +
-        "• qwen / qwen72 — Qwen2.5-72B\n" +
-        "• llama70 — Llama-3.3-70B\n" +
-        "• llama4 — Llama-4-Scout\n" +
-        "• deepseek — DeepSeek-R1-32B\n" +
-        "• command — Cohere Command-R\n\n" +
-        "أو أرسل معرّف كامل من HF:\n" +
-        "Qwen/Qwen2.5-72B-Instruct",
+        "• zephyr — Zephyr-7B",
     },
     category: "ذكاء اصطناعي",
     guide: {
       ar:
-        "{pn}hf [نموذج] [سؤالك]\n" +
-        "{pn}hf qwen7 ما هو الذكاء الاصطناعي؟\n" +
-        "{pn}hf llama اشرح البرمجة\n" +
-        "{pn}hf + صورة — تحليل الصورة\n" +
+        "{pn}hf [سؤالك]  ← llama4 افتراضي\n" +
+        "{pn}hf qwen7 اشرح البرمجة\n" +
+        "{pn}hf gemma + صورة — تحليل الصورة\n" +
         "{pn}hf نماذج — عرض كل النماذج\n" +
         "{pn}hf مسح — مسح الذاكرة",
     },
