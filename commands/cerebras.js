@@ -97,7 +97,18 @@ async function handle(api, event, args, registerReply) {
     );
   }
 
-  api.sendMessage("⚡ جاري المعالجة بـ Cerebras...", threadID, null, messageID);
+  // ─── رسالة واحدة قابلة للتعديل ───────────────────────────────
+  let statusMsgId = null;
+  try {
+    const sent = await new Promise((resolve, reject) =>
+      api.sendMessage("⚡ جاري المعالجة بـ Cerebras...", threadID, (err, info) => err ? reject(err) : resolve(info), messageID)
+    );
+    statusMsgId = sent?.messageID;
+  } catch (_) {}
+
+  const updateStatus = async (text) => {
+    try { if (statusMsgId) await api.editMessage(text, statusMsgId); } catch (_) {}
+  };
 
   const ctx = await loadCtx(senderID);
   const messages = [
@@ -114,17 +125,16 @@ async function handle(api, event, args, registerReply) {
     const errMsg = e.message.includes("ENV")
       ? "❌ CEREBRAS_API_KEY غير مضبوط في المتغيرات."
       : "❌ الخادم غير متاح حالياً، حاول لاحقاً.";
-    return api.sendMessage(errMsg, threadID, null, messageID);
+    return updateStatus(errMsg);
   }
 
-  api.sendMessage(reply, threadID, (err, info) => {
-    if (err || !info) return;
-    if (registerReply) {
-      registerReply(info.messageID, { author: senderID }, async ({ api, event }) => {
-        await handle(api, event, [event.body?.trim() || ""], registerReply);
-      });
-    }
-  }, messageID);
+  await updateStatus(reply);
+
+  if (statusMsgId && registerReply) {
+    registerReply(statusMsgId, { author: senderID }, async ({ api, event }) => {
+      await handle(api, event, [event.body?.trim() || ""], registerReply);
+    });
+  }
 
   await saveCtx(senderID, [
     ...ctx,

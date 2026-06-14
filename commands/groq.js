@@ -126,13 +126,25 @@ async function handle(api, event, prompt, registerReply) {
     );
   }
 
-  // مؤشر انتظار
-  api.sendMessage(
-    attachment
-      ? `⏳ جاري تحليل ${attachment.kind === "image" ? "الصورة 🖼️" : attachment.kind === "audio" ? "الصوت 🎵" : "الفيديو 🎬"}...`
-      : "⏳ جاري المعالجة...",
-    threadID, null, messageID
-  );
+  // ─── رسالة واحدة قابلة للتعديل ───────────────────────────────
+  let statusMsgId = null;
+  try {
+    const sent = await new Promise((resolve, reject) =>
+      api.sendMessage(
+        attachment
+          ? `⏳ جاري تحليل ${attachment.kind === "image" ? "الصورة 🖼️" : attachment.kind === "audio" ? "الصوت 🎵" : "الفيديو 🎬"}...`
+          : "⏳ جاري المعالجة...",
+        threadID,
+        (err, info) => err ? reject(err) : resolve(info),
+        messageID
+      )
+    );
+    statusMsgId = sent?.messageID;
+  } catch (_) {}
+
+  const updateStatus = async (text) => {
+    try { if (statusMsgId) await api.editMessage(text, statusMsgId); } catch (_) {}
+  };
 
   const ctx = await loadCtx(senderID);
 
@@ -155,7 +167,7 @@ async function handle(api, event, prompt, registerReply) {
     } else {
       // فشل التحميل — نرسل نصاً فقط
       userMsg = { role: "user", content: prompt.trim() || "وصف هذه الصورة" };
-      api.sendMessage("⚠️ تعذّر تحميل الصورة، سأجيب على النص فقط.", threadID, null, messageID);
+      await updateStatus("⚠️ تعذّر تحميل الصورة، سأجيب على النص فقط...");
     }
   } else if (attachment) {
     // صوت أو فيديو — نرسل الـ URL لـ HF يتولاه
@@ -175,17 +187,16 @@ async function handle(api, event, prompt, registerReply) {
     reply = await callHF(messages);
   } catch (e) {
     console.error("[GROQ→HF]", e.response?.status, e.message?.substring(0, 80));
-    return api.sendMessage("❌ الخادم غير متاح حالياً، حاول لاحقاً.", threadID, null, messageID);
+    return updateStatus("❌ الخادم غير متاح حالياً، حاول لاحقاً.");
   }
 
-  api.sendMessage(reply, threadID, (err, info) => {
-    if (err || !info) return;
-    if (registerReply) {
-      registerReply(info.messageID, { author: senderID }, async ({ api, event }) => {
-        await handle(api, event, event.body?.trim() || "", registerReply);
-      });
-    }
-  }, messageID);
+  await updateStatus(reply);
+
+  if (statusMsgId && registerReply) {
+    registerReply(statusMsgId, { author: senderID }, async ({ api, event }) => {
+      await handle(api, event, event.body?.trim() || "", registerReply);
+    });
+  }
 
   await saveCtx(senderID, [
     ...ctx,

@@ -56,7 +56,17 @@ module.exports = {
             const songName = trimmed.slice(trigger.length).trim();
             if (!songName) return message.reply("❌ مثال: sing shape of you");
 
-            message.reply("🔍 جاري البحث في SoundCloud...");
+            let statusMsgId = null;
+            try {
+                const sent = await new Promise((resolve, reject) =>
+                    api.sendMessage("🔍 جاري البحث في SoundCloud...", threadID, (err, info) => err ? reject(err) : resolve(info), messageID)
+                );
+                statusMsgId = sent?.messageID;
+            } catch (_) {}
+
+            const updateStatus = async (text) => {
+                try { if (statusMsgId) await api.editMessage(text, statusMsgId); } catch (_) {}
+            };
 
             try {
                 const res = await axios.get('https://api.ferdev.my.id/search/soundcloud', {
@@ -65,7 +75,7 @@ module.exports = {
                 });
 
                 const items = res.data?.result || [];
-                if (items.length === 0) return message.reply("❌ لم يتم العثور على نتائج.");
+                if (items.length === 0) return updateStatus("❌ لم يتم العثور على نتائج.");
 
                 const resultsArray = [];
                 let msg = "🎵 نتائج البحث:\n─────────────────\n";
@@ -80,21 +90,22 @@ module.exports = {
                 });
 
                 if (resultsArray.length === 0)
-                    return message.reply("❌ فشل استخراج الروابط من نتائج البحث.");
+                    return updateStatus("❌ فشل استخراج الروابط من نتائج البحث.");
 
                 global.soundcloudSearchSessions[senderID] = {
                     results:   resultsArray,
-                    timestamp: Date.now()
+                    timestamp: Date.now(),
+                    statusMsgId,
                 };
 
                 msg += `🔢 أرسل رقم الأغنية (1-${resultsArray.length}) للتحميل.\n⏳ تنتهي بعد دقيقتين.`;
-                return message.reply(msg);
+                return updateStatus(msg);
 
             } catch (error) {
                 console.error("[SING] Search error:", error.message);
                 if (error.code === 'ECONNABORTED' || error.message.includes('timeout'))
-                    return message.reply("❌ انتهت مهلة البحث، حاول مرة أخرى.");
-                return message.reply("❌ خطأ أثناء البحث.");
+                    return updateStatus("❌ انتهت مهلة البحث، حاول مرة أخرى.");
+                return updateStatus("❌ خطأ أثناء البحث.");
             }
         }
 
@@ -113,9 +124,14 @@ module.exports = {
                 return message.reply(`❌ اختر رقماً من 1 إلى ${session.results.length}`);
 
             const chosenTrack = session.results[index];
+            const statusMsgId = session.statusMsgId;
             delete global.soundcloudSearchSessions[senderID];
 
-            message.reply(`📥 جاري تحميل: ${chosenTrack.title}`);
+            const updateStatus = async (text) => {
+                try { if (statusMsgId) await api.editMessage(text, statusMsgId); } catch (_) {}
+            };
+
+            await updateStatus(`📥 جاري تحميل: ${chosenTrack.title}`);
 
             // ✅ /tmp بدل cache/sing — متوافق مع Render ephemeral filesystem
             const filePath = getTempPath(senderID);
@@ -145,13 +161,14 @@ module.exports = {
 
                 if (buffer.length === 0) throw new Error("الملف فارغ.");
                 if (buffer.length > 26214400)
-                    return message.reply("⚠️ الملف أكبر من 25MB، لا يمكن إرساله عبر ماسنجر.");
+                    return updateStatus("⚠️ الملف أكبر من 25MB، لا يمكن إرساله عبر ماسنجر.");
 
                 await fs.writeFile(filePath, buffer);
 
                 const stat = await fs.stat(filePath);
                 if (stat.size === 0) throw new Error("الملف فارغ بعد الحفظ.");
 
+                // أرسل الملف كمرفق، ثم احذف رسالة الحالة المؤقتة
                 await new Promise((resolve, reject) => {
                     api.sendMessage(
                         {
@@ -164,6 +181,10 @@ module.exports = {
                     );
                 });
 
+                if (statusMsgId) {
+                    try { await api.unsendMessage(statusMsgId, threadID); } catch (_) {}
+                }
+
             } catch (error) {
                 console.error("[SING] error:", error.message);
                 let msg;
@@ -175,7 +196,7 @@ module.exports = {
                     msg = "❌ فشل الـ API في إرجاع رابط التحميل، حاول أغنية أخرى.";
                 else
                     msg = "❌ فشل التحميل أو الإرسال. قد يكون المحتوى محمياً.";
-                message.reply(msg);
+                await updateStatus(msg);
             } finally {
                 try {
                     if (await fs.pathExists(filePath)) await fs.remove(filePath);

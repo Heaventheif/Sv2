@@ -221,13 +221,25 @@ async function handle(api, event, args, registerReply) {
   if (!HF_BASE)
     return api.sendMessage("❌ HF_SPACE_URL غير مضبوط في متغيرات Render", threadID, null, messageID);
 
-  // مؤشر انتظار
-  api.sendMessage(
-    attachment
-      ? `⏳ جاري تحليل ${attachment.kind === "image" ? "الصورة 🖼️" : attachment.kind === "audio" ? "الصوت 🎵" : "الفيديو 🎬"} لـ ${model}...`
-      : `⏳ جاري السؤال لـ ${model}...`,
-    threadID, null, messageID
-  );
+  // ─── رسالة واحدة قابلة للتعديل ───────────────────────────────
+  let statusMsgId = null;
+  try {
+    const sent = await new Promise((resolve, reject) =>
+      api.sendMessage(
+        attachment
+          ? `⏳ جاري تحليل ${attachment.kind === "image" ? "الصورة 🖼️" : attachment.kind === "audio" ? "الصوت 🎵" : "الفيديو 🎬"} لـ ${model}...`
+          : `⏳ جاري السؤال لـ ${model}...`,
+        threadID,
+        (err, info) => err ? reject(err) : resolve(info),
+        messageID
+      )
+    );
+    statusMsgId = sent?.messageID;
+  } catch (_) {}
+
+  const updateStatus = async (text) => {
+    try { if (statusMsgId) await api.editMessage(text, statusMsgId); } catch (_) {}
+  };
 
   // ─── تحضير رسالة المستخدم مع الوسيط ─────────────────────
   let userMsg;
@@ -246,7 +258,7 @@ async function handle(api, event, args, registerReply) {
       };
     } else {
       userMsg = { role: "user", content: prompt || "وصف هذه الصورة" };
-      api.sendMessage("⚠️ تعذّر تحميل الصورة، سأجيب على النص فقط.", threadID, null, messageID);
+      await updateStatus("⚠️ تعذّر تحميل الصورة، سأجيب على النص فقط...");
     }
   } else if (attachment) {
     userMsg = {
@@ -263,14 +275,13 @@ async function handle(api, event, args, registerReply) {
   try {
     const { reply, model_used } = await callHF(messages, model);
 
-    api.sendMessage(reply, threadID, (err, info) => {
-      if (err || !info) return;
-      if (registerReply) {
-        registerReply(info.messageID, { author: senderID }, async ({ api, event }) => {
-          await handle(api, event, [model, event.body?.trim() || ""].filter(Boolean), registerReply);
-        });
-      }
-    }, messageID);
+    await updateStatus(reply);
+
+    if (statusMsgId && registerReply) {
+      registerReply(statusMsgId, { author: senderID }, async ({ api, event }) => {
+        await handle(api, event, [model, event.body?.trim() || ""].filter(Boolean), registerReply);
+      });
+    }
 
     await saveCtx(senderID, [
       ...savedCtx,
@@ -287,7 +298,7 @@ async function handle(api, event, args, registerReply) {
     else
       msg += (err.message || "فشل الاتصال").substring(0, 120);
 
-    api.sendMessage(msg, threadID, null, messageID);
+    await updateStatus(msg);
   }
 }
 
