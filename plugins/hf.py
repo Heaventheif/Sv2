@@ -6,7 +6,7 @@ endpoint: POST /hf
 
 import os
 import logging
-import base64
+import re
 from huggingface_hub import InferenceClient
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -39,11 +39,10 @@ SHORTCUTS: dict[str, str] = {
     "command":   "CohereForAI/c4ai-command-r-plus-08-2024",
 }
 
-# نماذج تدعم Vision
+VISION_FALLBACK = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+
 VISION_MODELS = {
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-    "Qwen/Qwen2.5-72B-Instruct",
-    "Qwen/Qwen2.5-7B-Instruct",
     "google/gemma-3-27b-it",
     "google/gemma-3-4b-it",
     "mistralai/Mistral-Small-3.1-22B-Instruct-2503",
@@ -52,7 +51,8 @@ VISION_MODELS = {
 SYSTEM_PROMPT = (
     'أنت بوت مساعد ذكي اسمك "Sunken". '
     'أجب دائماً باللغة العربية بإيجاز (أقل من 300 كلمة). '
-    'كن ودوداً ومهذباً.'
+    'كن ودوداً ومهذباً. '
+    'لا تكتب أي تفكير أو تحليل داخلي، اكتب الجواب النهائي فقط مباشرة.'
 )
 
 
@@ -68,11 +68,38 @@ def resolve_model(name: str) -> str:
     return name
 
 
+def clean_reply(text: str) -> str:
+    """
+    إزالة كل أنماط التفكير والتحليل الداخلي:
+    - <think>...</think>
+    - <thinking>...</thinking>
+    - <analysis>...</analysis>
+    - أي نص قبل الجواب الحقيقي يبدأ بـ "الجواب:" أو "Answer:" إذا وُجد
+    """
+    # حذف وسوم التفكير
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<thinking>[\s\S]*?</thinking>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<analysis>[\s\S]*?</analysis>", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<reflection>[\s\S]*?</reflection>", "", text, flags=re.IGNORECASE)
+
+    # إذا فيه "الجواب:" أو "Answer:" → خذ ما بعده فقط
+    match = re.search(r"(?:الجواب|الإجابة|Answer)\s*:\s*", text, flags=re.IGNORECASE)
+    if match:
+        text = text[match.end():]
+
+    return text.strip()
+
+
+def has_image(messages: list) -> bool:
+    return any(
+        m.get("attachment", {}).get("kind") == "image" and m.get("attachment", {}).get("base64")
+        for m in messages
+    )
+
+
 def build_messages(raw_messages: list, model_id: str) -> list:
-    """يحوّل رسائل الـ client إلى صيغة HF مع دعم الصور"""
     result = []
 
-    # أضف system prompt
     if not any(m.get("role") == "system" for m in raw_messages):
         result.append({"role": "system", "content": SYSTEM_PROMPT})
 
@@ -82,7 +109,6 @@ def build_messages(raw_messages: list, model_id: str) -> list:
         att  = msg.get("attachment")
 
         if att and att.get("kind") == "image" and att.get("base64"):
-            # صورة base64 — نرسلها كـ vision content
             if model_id in VISION_MODELS:
                 content = [
                     {
@@ -94,9 +120,7 @@ def build_messages(raw_messages: list, model_id: str) -> list:
                     {"type": "text", "text": text or "وصف هذه الصورة"},
                 ]
             else:
-                # النموذج لا يدعم Vision — نرسل النص فقط
                 content = f"[المستخدم أرسل صورة] {text or 'وصف هذه الصورة'}"
-                logger.warning(f"[hf] {model_id} لا يدعم Vision، إرسال النص فقط")
         else:
             content = text
 
@@ -105,13 +129,18 @@ def build_messages(raw_messages: list, model_id: str) -> list:
     return result
 
 
-def call_hf_sync(model_id: str, messages: list, max_tokens: int = 512) -> str:
+def call_hf_sync(model_id: str, messages: list, max_tokens: int = 512) -> tuple[str, str]:
     token = HF_TOKEN.strip()
     if not token:
         raise RuntimeError("HF_TOKEN غير موجود — أضفه في Settings → Variables and secrets")
 
-    client   = InferenceClient(model=model_id, token=token)
-    built    = build_messages(messages, model_id)
+    actual_model = model_id
+    if has_image(messages) and model_id not in VISION_MODELS:
+        logger.warning(f"[hf] {model_id} لا يدعم Vision → تحويل لـ {VISION_FALLBACK}")
+        actual_model = VISION_FALLBACK
+
+    client = InferenceClient(model=actual_model, token=token)
+    built  = build_messages(messages, actual_model)
 
     result = client.chat_completion(
         messages=built,
@@ -119,10 +148,10 @@ def call_hf_sync(model_id: str, messages: list, max_tokens: int = 512) -> str:
         temperature=0.7,
     )
 
-    reply = result.choices[0].message.content.strip()
+    reply = clean_reply(result.choices[0].message.content or "")
     if not reply:
         raise RuntimeError("استجابة فارغة من النموذج")
-    return reply
+    return reply, actual_model
 
 
 def register(app):
@@ -132,7 +161,7 @@ def register(app):
         import asyncio
         try:
             body       = await request.json()
-            model_raw  = body.get("model", "qwen7")
+            model_raw  = body.get("model", "llama4")
             messages   = body.get("messages", [])
             max_tokens = int(body.get("max_tokens", 512))
 
@@ -140,14 +169,14 @@ def register(app):
                 return JSONResponse({"error": "messages مطلوب"}, status_code=400)
 
             model_id = resolve_model(model_raw)
-            logger.info(f"[hf] {model_raw} → {model_id}")
+            logger.info(f"[hf] {model_raw} → {model_id} | has_image={has_image(messages)}")
 
             try:
-                loop  = asyncio.get_event_loop()
-                reply = await loop.run_in_executor(
+                loop = asyncio.get_event_loop()
+                reply, model_used = await loop.run_in_executor(
                     None, call_hf_sync, model_id, messages, max_tokens
                 )
-                return JSONResponse({"reply": reply, "model_used": model_id})
+                return JSONResponse({"reply": reply, "model_used": model_used})
 
             except Exception as e:
                 logger.error(f"[hf] error: {e}")
@@ -162,5 +191,6 @@ def register(app):
         return JSONResponse({
             "shortcuts": SHORTCUTS,
             "vision_models": list(VISION_MODELS),
-            "tip": "يمكنك إرسال معرّف كامل مثل: 'Qwen/Qwen2.5-7B-Instruct'",
+            "vision_fallback": VISION_FALLBACK,
+            "default_model": "llama4",
         })
