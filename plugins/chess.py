@@ -18,4 +18,4 @@ def register(app):
             chess.Board(req.fen)
         except ValueError:
             raise HTTPException(400, "Invalid FEN string")
-        return apply_move_and_get_response(req.fen, req.move, req.bot_mode)
+        return apply_move_and_get_response(req.fen, req.move, req.bot_mode, req.difficulty)
