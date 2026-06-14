@@ -437,15 +437,11 @@ function onLoginSuccess(api) {
   api.setOptions({
     forceLogin:       true,
     listenEvents:     true,
-    updatePresence:   false,  // لا تبث "نشط الآن" — يخفّف الضغط على الجلسة
+    updatePresence:   false,
     selfListen:       false,
     online:           true,
-    autoMarkDelivery: false,  // لا تعلّم "تم التسليم" تلقائياً
-    autoMarkRead:     false,  // لا تعلّم "مقروء" تلقائياً — يشبه المتصفح الطبيعي
-    listenTyping:     false,  // لا تستمع لأحداث الكتابة — تقليل الضجيج
-    // تأخير بين الردود (مللي ثانية) — يمنع الإرسال الآلي السريع
-    messageDelay:     1200,
-    // سرعة قراءة الأحداث عبر MQTT — قيمة أعلى = أكثر طبيعية
+    autoMarkRead:     false,
+    listenTyping:     false,
     userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   });
 
