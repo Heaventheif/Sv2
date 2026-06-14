@@ -43,7 +43,7 @@ global.botApi           = null;
 
 const fs      = require("fs-extra");
 const path    = require("path");
-const login   = require("fca-unofficial");
+const login   = require("@dongdev/fca-unofficial");
 const chalk   = require("chalk");
 const express = require("express");
 
