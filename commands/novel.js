@@ -107,7 +107,7 @@ async function translateBatch(paragraphs) {
   return result.length > 0 ? result : paragraphs;
 }
 
-function splitMessage(text, maxLen = 3500) {
+function splitMessage(text, maxLen = 8000) {
   const chunks = [];
   let current = "";
   for (const para of text.split("\n\n")) {
