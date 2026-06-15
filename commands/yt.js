@@ -7,77 +7,61 @@ const path  = require("path");
 
 const BASE = "https://yt-dlp-stream.onrender.com/api";
 
-// ─── 7 أزواج إيموجي (mp3, mp4) ────────────────────────────────
+// ─── 7 أزواج إيموجي ────────────────────────────────────────────
 const EMOJI_PAIRS = [
   ["👍", "❤️"], ["😆", "😮"], ["😢", "😡"],
   ["🥰", "👏"], ["🔥", "💯"], ["😍", "😭"], ["🤔", "👀"],
 ];
 
 // ═══════════════════════════════════════════════════════════════
-// 🕺 ستيكرز الرقص — مزيج من أنمي + ميمز + فيسبوك الرسمية
+// 🕺 ستيكرز الرقص — ملفات محلية من مجلد assets/dance_stickers
 // ═══════════════════════════════════════════════════════════════
-// كل معرّف تحقق منه على فيسبوك ماسنجر ويُرسَل كـ { sticker: ID }
-const DANCE_STICKERS = [
-  // ─── Felix the Cat (رسمي فيسبوك) ─────────────────────────
-  369239263222822,   // 👍 (fallback معروف يعمل دائماً)
+//   • ضع ستيكراتك في:  assets/dance_stickers/
+//   • الامتدادات المدعومة:  .gif  .png  .webp
+//   • ملاحظة: GIF المتحركة تُظهر الرقص بشكل أجمل
+// ─────────────────────────────────────────────────────────────
+const STICKERS_DIR = path.join(__dirname, "..", "assets", "dance_stickers");
+const SUPPORTED_EXT = new Set([".gif", ".png", ".webp"]);
 
-  // ─── Meep (رسمي فيسبوك) ──────────────────────────────────
-  1476919779177967,  // Meep رقص
-  1476919775844634,  // Meep يتحرك
-  1476919769177968,  // Meep فرحان
-  1476919782511300,  // Meep موسيقى
+let _stickerCache = null;   // يُحمَّل مرة واحدة عند أول استخدام
 
-  // ─── Pusheen رقص ─────────────────────────────────────────
-  858796277557862,   // Pusheen رقص
-  858796324224524,   // Pusheen يتمايل
-  858796340891189,   // Pusheen موسيقى
-
-  // ─── Stickman ─────────────────────────────────────────────
-  1511819158906996,
-  1511819155573663,
-  1511819152240330,
-
-  // ─── UglyDolls ────────────────────────────────────────────
-  1616924261895369,
-  1616924258562036,
-
-  // ─── ستيكرز ميمز شهيرة على فيسبوك ───────────────────────
-  767260996730039,   // الرجل الراقص الشهير
-  767260986730040,
-  1109048629207137,
-  2219397278275076,
-  2219397274941743,
-
-  // ─── أنمي / كيوت ──────────────────────────────────────────
-  1527143324258607,
-  1527143320925274,
-  874028806056063,
-  874028802722730,
-  874028799389397,
-];
-
-// ─── اختيار عشوائي من القائمة ─────────────────────────────────
-function randomDanceSticker() {
-  return DANCE_STICKERS[Math.floor(Math.random() * DANCE_STICKERS.length)];
+function getStickerFiles() {
+  if (_stickerCache) return _stickerCache;
+  try {
+    const files = fs.readdirSync(STICKERS_DIR)
+      .filter(f => SUPPORTED_EXT.has(path.extname(f).toLowerCase()))
+      .map(f => path.join(STICKERS_DIR, f));
+    if (files.length === 0) {
+      console.warn("[YT/STICKER] ⚠️  مجلد الستيكرز فارغ:", STICKERS_DIR);
+      return [];
+    }
+    _stickerCache = files;
+    console.log(`[YT/STICKER] ✅ ${files.length} ستيكر جاهز`);
+    return files;
+  } catch (_) {
+    console.warn("[YT/STICKER] ⚠️  المجلد غير موجود — لن يُرسَل ستيكر");
+    return [];
+  }
 }
 
-// ─── إرسال ستيكر رقص (بدون try/catch خارجي — لا نريد إيقاف الكود) ──
+// ─── اختيار عشوائي وإرسال كـ attachment ────────────────────────
 async function sendDanceSticker(api, threadID) {
+  const files = getStickerFiles();
+  if (files.length === 0) return;
+
+  const chosen = files[Math.floor(Math.random() * files.length)];
   try {
     await new Promise((resolve, reject) =>
       api.sendMessage(
-        { sticker: randomDanceSticker() },
+        { attachment: fs.createReadStream(chosen) },
         threadID,
         (err) => err ? reject(err) : resolve()
       )
     );
+    console.log(`[YT/STICKER] 🕺 أُرسل: ${path.basename(chosen)}`);
   } catch (err) {
-    // إذا فشل الستيكر الأول جرب آخر
-    try {
-      await new Promise((resolve) =>
-        api.sendMessage({ sticker: 369239263222822 }, threadID, resolve)
-      );
-    } catch (_) {}
+    console.error("[YT/STICKER] فشل إرسال الستيكر:", err.message);
+    // لا نوقف البوت — الستيكر اختياري
   }
 }
 
@@ -107,7 +91,7 @@ async function cleanTemp(filePath) {
   try { if (await fs.pathExists(filePath)) await fs.remove(filePath); } catch (_) {}
 }
 
-// ─── v2: جلب روابط التحميل ────────────────────────────────────
+// ─── v2 ────────────────────────────────────────────────────────
 async function v2(query) {
   const url  = `${BASE}/v2/q?=${encodeURIComponent(query)}`;
   const res  = await axios.get(url, { timeout: 30000 });
@@ -117,7 +101,7 @@ async function v2(query) {
   return data;
 }
 
-// ─── v3: بحث وإعادة قائمة ─────────────────────────────────────
+// ─── v3 ────────────────────────────────────────────────────────
 async function v3(query, limit = 8) {
   const url  = `${BASE}/v3/q?=${encodeURIComponent(query)}&?=${limit}`;
   const res  = await axios.get(url, { timeout: 25000 });
@@ -129,7 +113,7 @@ async function v3(query, limit = 8) {
   return { results: [] };
 }
 
-// ─── استخرج روابط من v2 response ──────────────────────────────
+// ─── استخرج روابط من v2 ────────────────────────────────────────
 function parse(d) {
   if (!d || typeof d !== "object") return {
     title: "بدون عنوان", author: "", mp4Url: null, mp3Url: null
@@ -150,7 +134,7 @@ function parse(d) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// تحميل وإرسال + ستيكر رقص بعد الإرسال
+// تحميل وإرسال + ستيكر رقص
 // ═══════════════════════════════════════════════════════════════
 async function downloadAndSend(message, statusMsgId, query, wantMp4, api, threadID) {
   const updateStatus = async (text) => {
@@ -166,7 +150,7 @@ async function downloadAndSend(message, statusMsgId, query, wantMp4, api, thread
 
   const { stream, filePath } = await getStream(url);
   try {
-    // ── إرسال الملف الصوتي/المرئي ─────────────────────────
+    // ── إرسال الملف ────────────────────────────────────────
     await new Promise((resolve, reject) => {
       api.sendMessage(
         {
@@ -178,12 +162,12 @@ async function downloadAndSend(message, statusMsgId, query, wantMp4, api, thread
       );
     });
 
-    // ── حذف رسالة الانتظار ────────────────────────────────
+    // ── حذف رسالة الانتظار (إصلاح: threadID مطلوب) ────────
     if (statusMsgId) {
-      try { await api.unsendMessage(statusMsgId); } catch (_) {}
+      try { await api.unsendMessage(statusMsgId, threadID); } catch (_) {}
     }
 
-    // 🕺 ── إرسال ستيكر رقص عشوائي بدلاً من الصمت ─────────
+    // 🕺 ستيكر رقص من المجلد المحلي
     await sendDanceSticker(api, threadID);
 
   } finally {
@@ -196,7 +180,7 @@ module.exports = {
   config: {
     name:      "yt",
     aliases:   ["ytdl", "youtube", "mp3", "mp4", "yts"],
-    version:   "3.1",          // ← رُقِّم للتمييز
+    version:   "3.2",
     role:      0,
     countDown: 15,
     category:  "download",
@@ -208,7 +192,6 @@ module.exports = {
     }
   },
 
-  // ─── onStart ────────────────────────────────────────────────
   onStart: async ({ api, message, args, event }) => {
     const { threadID, messageID } = event;
 
@@ -226,7 +209,6 @@ module.exports = {
 
     if (!query) return message.reply("❌ أرسل اسم الأغنية أو الرابط.");
 
-    // ── رابط مباشر → تحميل فوري ────────────────────────────
     const isUrl = query.startsWith("http://") || query.startsWith("https://");
     if (isUrl) {
       let statusMsgId = null;
@@ -250,7 +232,6 @@ module.exports = {
       return;
     }
 
-    // ── اسم أغنية → بحث وعرض قائمة ────────────────────────
     let statusMsgId = null;
     try {
       const sent = await new Promise((resolve, reject) =>
@@ -283,7 +264,7 @@ module.exports = {
       await updateStatus(text);
 
       if (statusMsgId) {
-        const session = {
+        global.Kagenou.replies[statusMsgId] = {
           commandName: "yt",
           author:      event.senderID,
           results,
@@ -291,8 +272,6 @@ module.exports = {
           statusMsgId,
           timestamp:   Date.now()
         };
-
-        global.Kagenou.replies[statusMsgId] = session;
 
         global.client.reactionListener[statusMsgId] = {
           author: event.senderID,
@@ -326,7 +305,6 @@ module.exports = {
     }
   },
 
-  // ─── onReply: المستخدم يختار رقماً ─────────────────────────
   onReply: async ({ api, event, Reply, message }) => {
     if (event.senderID !== Reply.author || !Reply.results) return;
 
