@@ -131,7 +131,9 @@ module.exports = {
   },
 
   // ─── onStart ──────────────────────────────────────────────────
-  onStart: async ({ message, args, event }) => {
+  onStart: async ({ api, message, args, event }) => {
+    const { threadID, messageID } = event;
+
     if (!args[0]) return message.reply(
       "📥 يوتيوب دونلودر\n\n" +
       "🎵 yt <اسم أغنية>    — بحث وقائمة\n" +
