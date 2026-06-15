@@ -29,16 +29,6 @@ async function cleanTemp(filePath) {
   try { if (await fs.pathExists(filePath)) await fs.remove(filePath); } catch (_) {}
 }
 
-// ─── حذف رسالة الانتظار بأمان ────────────────────────────────
-function safeUnsend(message, wait) {
-  const id = wait?.messageID || wait;
-  if (!id) return;
-  try {
-    if (typeof message.unsend === "function") message.unsend(id);
-    else if (global.botApi?.unsendMessage) global.botApi.unsendMessage(id);
-  } catch (_) {}
-}
-
 // ─── v2: جلب روابط التحميل ────────────────────────────────────
 async function v2(query) {
   const url  = `${BASE}/v2/q?=${encodeURIComponent(query)}`;
@@ -54,10 +44,10 @@ async function v3(query, limit = 8) {
   const url  = `${BASE}/v3/q?=${encodeURIComponent(query)}&?=${limit}`;
   const res  = await axios.get(url, { timeout: 25000 });
   const data = res.data;
-  if (Array.isArray(data))               return { results: data };
+  if (Array.isArray(data))           return { results: data };
   if (!data || typeof data !== "object") return { results: [] };
-  if (Array.isArray(data.results))       return data;
-  if (Array.isArray(data.data))          return { results: data.data };
+  if (Array.isArray(data.results))   return data;
+  if (Array.isArray(data.data))      return { results: data.data };
   return { results: [] };
 }
 
@@ -82,22 +72,34 @@ function parse(d) {
 }
 
 // ─── تحميل وإرسال ─────────────────────────────────────────────
-async function downloadAndSend(message, wait, query, wantMp4) {
+async function downloadAndSend(message, statusMsgId, query, wantMp4, api, threadID) {
+  const updateStatus = async (text) => {
+    try { if (statusMsgId) await api.editMessage(text, statusMsgId); } catch (_) {}
+  };
+
   const p   = parse(await v2(query));
   const url = wantMp4 ? p.mp4Url : p.mp3Url;
 
   if (!url) {
-    safeUnsend(message, wait);
-    return message.reply(`❌ الرابط غير متاح.\n💡 جرّب النوع الآخر.`);
+    return updateStatus(`❌ الرابط غير متاح.\n💡 جرّب النوع الآخر.`);
   }
 
   const { stream, filePath } = await getStream(url);
-  safeUnsend(message, wait);
   try {
-    await message.reply({
-      body:       `${wantMp4 ? "🎬" : "🎵"} ${p.title}\n📺 ${p.author}`.trim(),
-      attachment: stream
+    await new Promise((resolve, reject) => {
+      api.sendMessage(
+        {
+          body:       `${wantMp4 ? "🎬" : "🎵"} ${p.title}\n📺 ${p.author}`.trim(),
+          attachment: stream
+        },
+        threadID,
+        (err) => err ? reject(err) : resolve()
+      );
     });
+
+    if (statusMsgId) {
+      try { await api.unsendMessage(statusMsgId, threadID); } catch (_) {}
+    }
   } finally { await cleanTemp(filePath); }
 }
 
@@ -136,55 +138,71 @@ module.exports = {
     // ── رابط مباشر → تحميل فوري ──────────────────────────────
     const isUrl = query.startsWith("http://") || query.startsWith("https://");
     if (isUrl) {
-      const wait = await message.reply(`⏳ ${wantMp4 ? "🎬 جارٍ تحميل الفيديو..." : "🎵 جارٍ تحميل الصوت..."}`);
+      let statusMsgId = null;
       try {
-        await downloadAndSend(message, wait, query, wantMp4);
+        const sent = await new Promise((resolve, reject) =>
+          api.sendMessage(`⏳ ${wantMp4 ? "🎬 جارٍ تحميل الفيديو..." : "🎵 جارٍ تحميل الصوت..."}`, threadID, (err, info) => err ? reject(err) : resolve(info), messageID)
+        );
+        statusMsgId = sent?.messageID;
+      } catch (_) {}
+
+      try {
+        await downloadAndSend(message, statusMsgId, query, wantMp4, api, threadID);
       } catch (e) {
-        safeUnsend(message, wait);
-        message.reply("❌ " + (e.response?.data?.error || e.message));
+        try { if (statusMsgId) await api.editMessage("❌ " + (e.response?.data?.error || e.message), statusMsgId); } catch (_) {}
       }
       return;
     }
 
     // ── اسم أغنية → بحث وعرض قائمة ──────────────────────────
-    const wait = await message.reply(`🔍 جارٍ البحث عن "${query}"...`);
+    let statusMsgId = null;
+    try {
+      const sent = await new Promise((resolve, reject) =>
+        api.sendMessage(`🔍 جارٍ البحث عن "${query}"...`, threadID, (err, info) => err ? reject(err) : resolve(info), messageID)
+      );
+      statusMsgId = sent?.messageID;
+    } catch (_) {}
+
+    const updateStatus = async (text) => {
+      try { if (statusMsgId) await api.editMessage(text, statusMsgId); } catch (_) {}
+    };
+
     try {
       const res = await v3(query, 8);
-      safeUnsend(message, wait);
 
       if (!res.results?.length)
-        return message.reply("❌ لم تُعثر على نتائج.");
+        return updateStatus("❌ لم تُعثر على نتائج.");
 
-      let text = `🎵 نتائج "${query}":\n${"─".repeat(28)}\n`;
+      let text = `🎵 نتائج "${query}":\n─────────────────\n`;
       res.results.forEach((v, i) => {
-        text += `${i + 1}. ${v.title}\n`;
-        text += `   📺 ${v.channel_name || ""}  ⏱ ${v.duration || ""}  👁 ${Number(v.views || 0).toLocaleString()}\n`;
-        text += `${"─".repeat(28)}\n`;
+        text += `${i + 1}. ${v.title}\n   ⏱ ${v.duration || "--"}\n─────────────────\n`;
       });
       text += wantMp4
         ? "✏️ رُد بالرقم → فيديو MP4"
         : "✏️ رُد بالرقم → MP3 | رقم + mp4 → فيديو";
 
-      const info = await message.reply(text);
-      if (info?.messageID) {
-        global.Kagenou.replies[info.messageID] = {
+      await updateStatus(text);
+
+      if (statusMsgId) {
+        global.Kagenou.replies[statusMsgId] = {
           commandName: "yt",
           author:      event.senderID,
           results:     res.results,
           wantMp4,          // ← يحفظ نوع الطلب الأصلي
+          statusMsgId,
           timestamp:   Date.now()
         };
       }
     } catch (e) {
-      safeUnsend(message, wait);
-      message.reply("❌ " + (e.response?.data?.error || e.message));
+      await updateStatus("❌ " + (e.response?.data?.error || e.message));
     }
   },
 
   // ─── onReply: المستخدم يختار رقماً ───────────────────────────
-  onReply: async ({ event, Reply, message }) => {
+  onReply: async ({ api, event, Reply, message }) => {
     if (event.senderID !== Reply.author || !Reply.results) return;
 
+    const { threadID, messageID } = event;
     const parts   = event.body?.trim().split(/\s+/) || [];
     const idx     = parseInt(parts[0]) - 1;
     // يمكن تغيير النوع بكتابة "1 mp4" أو "1 mp3"
@@ -197,14 +215,19 @@ module.exports = {
     if (isNaN(idx) || idx < 0 || idx >= Reply.results.length)
       return message.reply(`❌ أرسل رقماً من 1 إلى ${Reply.results.length}`);
 
-    const chosen = Reply.results[idx];
-    const wait   = await message.reply(`⏳ جارٍ تحميل: ${chosen.title}...`);
+    const chosen     = Reply.results[idx];
+    const statusMsgId = Reply.statusMsgId;
+
+    const updateStatus = async (text) => {
+      try { if (statusMsgId) await api.editMessage(text, statusMsgId); } catch (_) {}
+    };
+
+    await updateStatus(`⏳ جارٍ تحميل: ${chosen.title}...`);
 
     try {
-      await downloadAndSend(message, wait, chosen.url || chosen.short_url, wantMp4);
+      await downloadAndSend(message, statusMsgId, chosen.url || chosen.short_url, wantMp4, api, threadID);
     } catch (e) {
-      safeUnsend(message, wait);
-      message.reply("❌ " + (e.response?.data?.error || e.message));
+      await updateStatus("❌ " + (e.response?.data?.error || e.message));
     }
   }
 };
