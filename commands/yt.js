@@ -5,6 +5,17 @@ const path  = require("path");
 
 const BASE = "https://yt-dlp-stream.onrender.com/api";
 
+// ─── 7 أزواج إيموجي (mp3, mp4) — 14 إيموجي فريد من الأكثر استخداماً ─
+const EMOJI_PAIRS = [
+  ["🎵", "🎬"],
+  ["😍", "😂"],
+  ["❤️", "🔥"],
+  ["👍", "😮"],
+  ["😢", "🙏"],
+  ["🥳", "😎"],
+  ["💯", "👏"],
+];
+
 // ─── تحميل الملف على /tmp ثم إرساله كـ ReadStream ────────────
 async function getStream(url) {
   const ext      = url.match(/\.(mp4|mp3|webm|m4a)/i)?.[1] || "mp3";
@@ -168,30 +179,61 @@ module.exports = {
     };
 
     try {
-      const res = await v3(query, 8);
+      const res = await v3(query, 7);
 
       if (!res.results?.length)
         return updateStatus("❌ لم تُعثر على نتائج.");
 
-      let text = `🎵 نتائج "${query}":\n─────────────────\n`;
-      res.results.forEach((v, i) => {
-        text += `${i + 1}. ${v.title}\n   ⏱ ${v.duration || "--"}\n─────────────────\n`;
+      const results = res.results.slice(0, 7);
+
+      let text = `🎵 نتائج البحث:\n─────────────────\n`;
+      results.forEach((v, i) => {
+        const [mp3Emoji, mp4Emoji] = EMOJI_PAIRS[i];
+        text += `${i + 1}. ${v.title}\n   ⏱ ${v.duration || "--"}\n   ${mp3Emoji} mp3  |  ${mp4Emoji} mp4\n─────────────────\n`;
       });
-      text += wantMp4
-        ? "✏️ رُد بالرقم → فيديو MP4"
-        : "✏️ رُد بالرقم → MP3 | رقم + mp4 → فيديو";
+      text += `🔢 رُد بالرقم، أو تفاعل بإيموجي مناسب (mp3/mp4)\n⏳ تنتهي بعد دقيقتين.`;
 
       await updateStatus(text);
 
       if (statusMsgId) {
-        global.Kagenou.replies[statusMsgId] = {
+        const session = {
           commandName: "yt",
           author:      event.senderID,
-          results:     res.results,
+          results,
           wantMp4,          // ← يحفظ نوع الطلب الأصلي
           statusMsgId,
           timestamp:   Date.now()
         };
+
+        global.Kagenou.replies[statusMsgId] = session;
+
+        // ─── تسجيل مستمع التفاعلات (14 إيموجي = 7 نتائج × mp3/mp4) ─
+        global.client.reactionListener[statusMsgId] = {
+          author: event.senderID,
+          callback: async ({ api, event: reactEvent }) => {
+            const reaction = reactEvent.reaction;
+            const idx = EMOJI_PAIRS.findIndex(([mp3, mp4]) => reaction === mp3 || reaction === mp4);
+            if (idx === -1 || idx >= results.length) return;
+
+            const wantMp4Reaction = reaction === EMOJI_PAIRS[idx][1];
+            const chosen = results[idx];
+
+            delete global.client.reactionListener[statusMsgId];
+            delete global.Kagenou.replies[statusMsgId];
+
+            await updateStatus(`⏳ جارٍ تحميل: ${chosen.title}...`);
+            try {
+              await downloadAndSend(message, statusMsgId, chosen.url || chosen.short_url, wantMp4Reaction, api, threadID);
+            } catch (e) {
+              await updateStatus("❌ " + (e.response?.data?.error || e.message));
+            }
+          }
+        };
+
+        // إيقاف مستمع التفاعل بعد دقيقتين
+        setTimeout(() => {
+          if (global.client.reactionListener[statusMsgId]) delete global.client.reactionListener[statusMsgId];
+        }, 120000);
       }
     } catch (e) {
       await updateStatus("❌ " + (e.response?.data?.error || e.message));
@@ -217,6 +259,9 @@ module.exports = {
 
     const chosen     = Reply.results[idx];
     const statusMsgId = Reply.statusMsgId;
+
+    delete global.client.reactionListener[statusMsgId];
+    delete global.Kagenou.replies[statusMsgId];
 
     const updateStatus = async (text) => {
       try { if (statusMsgId) await api.editMessage(text, statusMsgId); } catch (_) {}
