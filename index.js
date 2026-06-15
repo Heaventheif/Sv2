@@ -241,6 +241,23 @@ const handleMessage = async (api, event) => {
   }
 };
 
+// ─── Reaction Handler ──────────────────────────────────────────
+const handleReaction = async (api, event) => {
+  const msgID = event.messageID;
+  if (!msgID) return;
+
+  const entry = global.client.reactionListener[msgID];
+  if (!entry) return;
+
+  if (entry.author && event.userID !== entry.author) return;
+
+  try {
+    await entry.callback({ api, event });
+  } catch (e) {
+    console.error("[REACTION ERR]", e.message);
+  }
+};
+
 // ─── Event Handler ────────────────────────────────────────────
 const handleEvent = async (api, event) => {
   // ━━━ إصلاح السبب الأول للتنفيذ المزدوج ━━━━━━━━━━━━━━━━━━━━
@@ -294,6 +311,8 @@ const startListening = (api) => {
         if (["message","message_reply","log","event"].includes(event.type)) {
           await handleEvent(api, event);
           await handleMessage(api, event);
+        } else if (event.type === "message_reaction") {
+          await handleReaction(api, event);
         }
       } catch (e) { console.error("[EVENT ERR]", e.message); }
     });
