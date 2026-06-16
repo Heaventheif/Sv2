@@ -1,12 +1,26 @@
 "use strict";
 /**
- * yt.js v4.0
- * ──────────────────────────────────────────────────────────────
- * البحث  : ytsearch عبر HF Space  (/yt/search)
- * التحميل: yt.py على HF Space     (/yt/audio  |  /yt/video)
- * الجودة : MP3 128k  |  MP4 360p
- * ──────────────────────────────────────────────────────────────
- * نظام الإيموجي + قائمة 10 نتائج + ستيكرز الرقص محفوظة كما هي
+ * yt.js v5.0
+ * ══════════════════════════════════════════════════════════════
+ * التدفق الكامل:
+ *
+ *   المستخدم (فيسبوك)
+ *       ↓ أمر بحث
+ *   yt.js  →  POST {HF}/yt/search  {"query":"..."}
+ *       ↓
+ *   yt.py  →  GET CF_WORKER/yt/search?q=...  →  YouTube
+ *       ↓ نتائج JSON
+ *   yt.js  →  يعرض قائمة 10 نتائج
+ *       ↓ المستخدم يختار (رقم أو إيموجي)
+ *   yt.js  →  POST {HF}/yt/audio|video  {"url":"..."}
+ *       ↓
+ *   yt.py  →  yt-dlp عبر CF Worker proxy  →  YouTube
+ *       ↓ FileResponse (MP3/MP4)
+ *   yt.js  →  يرسل الملف + ستيكر للمستخدم
+ *
+ * متغيرات البيئة المطلوبة:
+ *   HF_SPACE_URL  — عنوان HF Space مثال: https://user-bot.hf.space
+ * ══════════════════════════════════════════════════════════════
  */
 
 const axios = require("axios");
@@ -14,7 +28,7 @@ const fs    = require("fs-extra");
 const os    = require("os");
 const path  = require("path");
 
-// ─── عنوان HF Space ──────────────────────────────────────────
+// ─── عنوان HF Space (كل الطلبات تمر عبره) ───────────────────
 const HF = (process.env.HF_SPACE_URL || "").replace(/\/+$/, "");
 
 // ─── 10 أزواج إيموجي (mp3 | mp4) ────────────────────────────
@@ -25,7 +39,7 @@ const EMOJI_PAIRS = [
 ];
 
 // ═══════════════════════════════════════════════════════════════
-// 🕺  ستيكرز الرقص (من الملف الأصلي — لم يتغيّر)
+// 🕺  ستيكرز الرقص
 // ═══════════════════════════════════════════════════════════════
 const STICKERS_DIR  = path.join(__dirname, "..", "assets", "dance_stickers");
 const SUPPORTED_EXT = new Set([".gif", ".png", ".webp"]);
@@ -69,21 +83,25 @@ async function sendDanceSticker(api, threadID) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 🔍  البحث عبر HF Space  →  /yt/search
+// 🔍  البحث — يُرسَل لـ yt.py الذي يُوجّهه لـ CF Worker
+// yt.js  →  POST {HF}/yt/search  →  yt.py  →  CF Worker  →  YouTube
 // ═══════════════════════════════════════════════════════════════
 async function ytSearch(query, limit = 10) {
   if (!HF) throw new Error("HF_SPACE_URL غير مضبوط في متغيرات البيئة");
+
   const { data } = await axios.post(
     `${HF}/yt/search`,
     { query, limit },
-    { timeout: 40000, headers: { "Content-Type": "application/json" } }
+    { timeout: 30000, headers: { "Content-Type": "application/json" } }
   );
+
   if (!data.results?.length) throw new Error("لا توجد نتائج");
-  return data.results;   // [{title, url, duration, uploader, id}, ...]
+  return data.results;  // [{title, url, duration, uploader, id}, ...]
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ⬇️  التحميل من HF Space + حفظ مؤقت + ReadStream
+// ⬇️  تحميل — يُرسَل الرابط المختار لـ yt.py الذي يُحمّله عبر CF Worker
+// yt.js  →  POST {HF}/yt/audio|video  →  yt.py  →  CF proxy  →  YouTube
 // ═══════════════════════════════════════════════════════════════
 async function downloadFromHF(ytUrl, wantMp4) {
   if (!HF) throw new Error("HF_SPACE_URL غير مضبوط");
@@ -97,18 +115,18 @@ async function downloadFromHF(ytUrl, wantMp4) {
     { url: ytUrl },
     {
       responseType:     "arraybuffer",
-      timeout:          5 * 60 * 1000,          // 5 دقائق
+      timeout:          5 * 60 * 1000,           // 5 دقائق
       maxContentLength: 45 * 1024 * 1024,
       maxBodyLength:    45 * 1024 * 1024,
       headers: { "Content-Type": "application/json" },
     }
   );
 
-  // تحقق: هل الرد JSON خطأ؟
+  // تحقق: هل الرد JSON خطأ من yt.py؟
   const ct = res.headers["content-type"] || "";
   if (ct.includes("application/json")) {
     const errText = Buffer.from(res.data).toString();
-    let errMsg = "خطأ غير معروف";
+    let errMsg = "خطأ غير معروف من HF Space";
     try { errMsg = JSON.parse(errText).error || errMsg; } catch (_) {}
     throw new Error(errMsg);
   }
@@ -137,7 +155,7 @@ async function cleanTemp(p) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 📤  تحميل + إرسال + ستيكر
+// 📤  تحميل + إرسال الملف + ستيكر رقص
 // ═══════════════════════════════════════════════════════════════
 async function downloadAndSend(api, threadID, statusMsgId, ytUrl, wantMp4) {
   const update = async (t) => {
@@ -153,7 +171,7 @@ async function downloadAndSend(api, threadID, statusMsgId, ytUrl, wantMp4) {
       const s = parseInt(sec) || 0;
       if (!s) return "";
       const m = Math.floor(s / 60), ss = s % 60;
-      return ` ⏱ ${m}:${String(ss).padStart(2,"0")}`;
+      return ` ⏱ ${m}:${String(ss).padStart(2, "0")}`;
     };
 
     const body =
@@ -170,7 +188,7 @@ async function downloadAndSend(api, threadID, statusMsgId, ytUrl, wantMp4) {
       )
     );
 
-    // احذف رسالة الانتظار بعد الإرسال الناجح
+    // احذف رسالة الانتظار
     try { if (statusMsgId) api.unsendMessage(statusMsgId, () => {}); } catch (_) {}
 
     // 🕺 ستيكر رقص
@@ -178,7 +196,6 @@ async function downloadAndSend(api, threadID, statusMsgId, ytUrl, wantMp4) {
 
   } catch (err) {
     let msg = err.message || "خطأ غير معروف";
-    // هل هو JSON خطأ من HF؟
     if (err.response?.data) {
       try {
         const t = Buffer.isBuffer(err.response.data)
@@ -215,7 +232,7 @@ module.exports = {
   config: {
     name:      "yt",
     aliases:   ["ytdl", "youtube", "mp3", "mp4", "يوتيوب"],
-    version:   "4.0",
+    version:   "5.0",
     role:      0,
     countDown: 15,
     category:  "download",
@@ -227,12 +244,11 @@ module.exports = {
     }
   },
 
-  // ───────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────
   onStart: async ({ api, message, args, event }) => {
     const { threadID, messageID } = event;
 
     if (!HF) return message.reply("❌ HF_SPACE_URL غير مضبوط في متغيرات البيئة.");
-
     if (!args[0]) return message.reply(
       "📥 يوتيوب دونلودر\n\n" +
       "🎵 .yt <اسم أغنية>    — بحث وقائمة\n" +
@@ -251,7 +267,7 @@ module.exports = {
 
     const isUrl = /^https?:\/\//i.test(query);
 
-    // ── تحميل مباشر برابط ─────────────────────────────────
+    // ── تحميل مباشر برابط ───────────────────────────────────
     if (isUrl) {
       let statusMsgId = null;
       try {
@@ -265,12 +281,11 @@ module.exports = {
         );
         statusMsgId = sent?.messageID;
       } catch (_) {}
-
       await downloadAndSend(api, threadID, statusMsgId, query, wantMp4);
       return;
     }
 
-    // ── بحث بالاسم ────────────────────────────────────────
+    // ── بحث بالاسم ──────────────────────────────────────────
     let statusMsgId = null;
     try {
       const sent = await new Promise((res, rej) =>
@@ -290,10 +305,8 @@ module.exports = {
 
     try {
       const results = await ytSearch(query, 10);
-
       await update(buildListText(results));
 
-      // ── حفظ السياق للرد والإيموجي ───────────────────────
       if (statusMsgId) {
         // onReply
         if (global.Kagenou?.replies) {
@@ -322,6 +335,7 @@ module.exports = {
               if (global.Kagenou?.replies) delete global.Kagenou.replies[statusMsgId];
 
               await update(`⏳ جارٍ تحميل: ${chosen.title}...`);
+              // ✅ يُرسَل الرابط المختار لـ yt.py → CF Worker → YouTube
               await downloadAndSend(api, threadID, statusMsgId, chosen.url, wantMp4R);
             }
           };
@@ -337,7 +351,7 @@ module.exports = {
     }
   },
 
-  // ───────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────
   onReply: async ({ api, event, Reply, message }) => {
     if (!Reply?.results || event.senderID !== Reply.author) return;
 
@@ -366,6 +380,7 @@ module.exports = {
     };
 
     await update(`⏳ جارٍ تحميل: ${chosen.title}...`);
+    // ✅ يُرسَل الرابط المختار لـ yt.py → CF Worker → YouTube
     await downloadAndSend(api, threadID, statusMsgId, chosen.url, wantMp4);
   },
 };
