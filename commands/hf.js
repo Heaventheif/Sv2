@@ -132,10 +132,13 @@ async function handle(api, event, args, registerReply) {
 
   const firstArg = args[0]?.toLowerCase() || "";
 
+  // ✅ الجلسة الجماعية: threadID بدل senderID
+  const sessionKey = threadID;
+
   // ─── مسح الذاكرة ─────────────────────────────────────────
   if (["مسح", "clear", "reset"].includes(firstArg)) {
-    try { await Session.findByIdAndDelete(senderID); } catch (_) {}
-    return api.sendMessage("🧹 تم مسح ذاكرة المحادثة.", threadID, null, messageID);
+    try { await Session.findByIdAndDelete(sessionKey); } catch (_) {}
+    return api.sendMessage("🧹 تم مسح ذاكرة المجموعة.", threadID, null, messageID);
   }
 
   // ─── عرض النماذج ─────────────────────────────────────────
@@ -175,7 +178,7 @@ async function handle(api, event, args, registerReply) {
   }
 
   // ─── تحديد النموذج والسؤال ───────────────────────────────
-  const { messages: savedCtx, model: savedModel } = await loadCtx(senderID);
+  const { messages: savedCtx, model: savedModel } = await loadCtx(sessionKey);
 
   let model, promptArgs;
 
@@ -199,6 +202,15 @@ async function handle(api, event, args, registerReply) {
 
   if (!prompt && event.messageReply?.body)
     prompt = event.messageReply.body.trim();
+
+  // ─── جلب اسم المرسل للسياق الجماعي ──────────────────────
+  let senderName = senderID;
+  try {
+    const userInfo = await new Promise((res, rej) =>
+      api.getUserInfo(senderID, (err, data) => err ? rej(err) : res(data))
+    );
+    senderName = userInfo?.[senderID]?.name || senderID;
+  } catch (_) {}
 
   // ─── كشف الوسائط ─────────────────────────────────────────
   const attachment = detectAttachment(event);
@@ -249,7 +261,7 @@ async function handle(api, event, args, registerReply) {
     if (imgData) {
       userMsg = {
         role: "user",
-        content: prompt || "وصف هذه الصورة",
+        content: `[${senderName}]: ${prompt || "وصف هذه الصورة"}`,
         attachment: {
           kind:        "image",
           base64:      imgData.base64,
@@ -257,17 +269,17 @@ async function handle(api, event, args, registerReply) {
         },
       };
     } else {
-      userMsg = { role: "user", content: prompt || "وصف هذه الصورة" };
+      userMsg = { role: "user", content: `[${senderName}]: ${prompt || "وصف هذه الصورة"}` };
       await updateStatus("⚠️ تعذّر تحميل الصورة، سأجيب على النص فقط...");
     }
   } else if (attachment) {
     userMsg = {
       role: "user",
-      content: prompt || (attachment.kind === "audio" ? "فرّغ هذا الصوت" : "حلل هذا الفيديو"),
+      content: `[${senderName}]: ${prompt || (attachment.kind === "audio" ? "فرّغ هذا الصوت" : "حلل هذا الفيديو")}`,
       attachment: { kind: attachment.kind, url: attachment.url },
     };
   } else {
-    userMsg = { role: "user", content: prompt };
+    userMsg = { role: "user", content: `[${senderName}]: ${prompt}` };
   }
 
   const messages = [...savedCtx, userMsg];
@@ -283,7 +295,7 @@ async function handle(api, event, args, registerReply) {
       });
     }
 
-    await saveCtx(senderID, [
+    await saveCtx(sessionKey, [
       ...savedCtx,
       { role: "user",      content: userMsg.content },
       { role: "assistant", content: reply },

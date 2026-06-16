@@ -1,4 +1,3 @@
-"use strict";
 const axios    = require("axios");
 const mongoose = require("mongoose");
 
@@ -17,7 +16,7 @@ async function loadCtx(id) {
   try {
     if (!global.db) return [];
     const doc = await Session.findById(id).lean();
-    return doc?.messages?.slice(-10) || [];
+    return doc?.messages?.slice(-20) || [];
   } catch (_) { return []; }
 }
 
@@ -26,7 +25,7 @@ async function saveCtx(id, messages) {
     if (!global.db) return;
     await Session.findByIdAndUpdate(
       id,
-      { messages: messages.slice(-10), updatedAt: new Date() },
+      { messages: messages.slice(-20), updatedAt: new Date() },
       { upsert: true }
     );
   } catch (_) {}
@@ -34,7 +33,6 @@ async function saveCtx(id, messages) {
 
 const SYSTEM = 'أنت بوت مساعد ذكي اسمك "Sunken". أجب دائماً باللغة العربية بإيجاز (أقل من 300 كلمة). كن ودوداً ومهذباً.';
 
-// النماذج المتاحة
 const MODELS = {
   "120b": "gpt-oss-120b",
   "20b":  "gpt-oss-20b",
@@ -69,9 +67,10 @@ async function callCerebras(messages, model = DEFAULT_MODEL) {
 }
 
 async function handle(api, event, args, registerReply) {
+  // ✅ الجلسة الجماعية: threadID بدل senderID
   const { threadID, messageID, senderID } = event;
+  const sessionKey = threadID;
 
-  // تحديد النموذج إذا كتب المستخدم مثلاً: .gpt 20b سؤال
   let model = DEFAULT_MODEL;
   let promptParts = [...args];
 
@@ -80,11 +79,12 @@ async function handle(api, event, args, registerReply) {
   }
 
   const prompt = promptParts.join(" ").trim();
+  const senderName = event.senderID || "مستخدم";
 
   // مسح الذاكرة
   if (["clear", "مسح", "reset"].includes(prompt.toLowerCase())) {
-    try { await Session.findByIdAndDelete(senderID); } catch (_) {}
-    return api.sendMessage("🧹 تم مسح ذاكرة المحادثة.", threadID, null, messageID);
+    try { await Session.findByIdAndDelete(sessionKey); } catch (_) {}
+    return api.sendMessage("🧹 تم مسح ذاكرة المجموعة.", threadID, null, messageID);
   }
 
   if (!prompt) {
@@ -92,12 +92,11 @@ async function handle(api, event, args, registerReply) {
       "❓ اكتب سؤالك!\n" +
       "مثال: .gpt ما هي عاصمة فرنسا؟\n" +
       ".gpt 20b سؤالك — لاستخدام النموذج الأصغر\n" +
-      ".gpt مسح — لمسح الذاكرة",
+      ".gpt مسح — لمسح ذاكرة المجموعة",
       threadID, null, messageID
     );
   }
 
-  // ─── رسالة واحدة قابلة للتعديل ───────────────────────────────
   let statusMsgId = null;
   try {
     const sent = await new Promise((resolve, reject) =>
@@ -110,11 +109,23 @@ async function handle(api, event, args, registerReply) {
     try { if (statusMsgId) await api.editMessage(text, statusMsgId); } catch (_) {}
   };
 
-  const ctx = await loadCtx(senderID);
+  const ctx = await loadCtx(sessionKey);
+
+  // ✅ نضيف اسم المرسل للسياق الجماعي
+  let senderDisplayName = senderID;
+  try {
+    const userInfo = await new Promise((res, rej) =>
+      api.getUserInfo(senderID, (err, data) => err ? rej(err) : res(data))
+    );
+    senderDisplayName = userInfo?.[senderID]?.name || senderID;
+  } catch (_) {}
+
+  const userContent = `[${senderDisplayName}]: ${prompt}`;
+
   const messages = [
     { role: "system", content: SYSTEM },
     ...ctx,
-    { role: "user", content: prompt },
+    { role: "user", content: userContent },
   ];
 
   let reply;
@@ -136,9 +147,9 @@ async function handle(api, event, args, registerReply) {
     });
   }
 
-  await saveCtx(senderID, [
+  await saveCtx(sessionKey, [
     ...ctx,
-    { role: "user",      content: prompt },
+    { role: "user",      content: userContent },
     { role: "assistant", content: reply },
   ]);
 }
@@ -147,11 +158,11 @@ module.exports = {
   config: {
     name: "gpt",
     aliases: ["cerebras", "gptoss"],
-    version: "1.0.0",
+    version: "2.0.0",
     author: "Sunken",
     countDown: 3,
     role: 0,
-    shortDescription: { ar: "محادثة ذكية — Cerebras GPT OSS 120B" },
+    shortDescription: { ar: "محادثة ذكية جماعية — Cerebras GPT OSS 120B" },
     category: "ذكاء اصطناعي",
     guide: { ar: "{pn}gpt [سؤالك]\n{pn}gpt 20b [سؤالك]\n{pn}gpt مسح" },
   },

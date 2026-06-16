@@ -1,4 +1,3 @@
-"use strict";
 const axios    = require("axios");
 const mongoose = require("mongoose");
 
@@ -16,7 +15,7 @@ async function loadCtx(id) {
   try {
     if (!global.db) return [];
     const doc = await Session.findById(id).lean();
-    return doc?.messages?.slice(-10) || [];
+    return doc?.messages?.slice(-20) || [];
   } catch (_) { return []; }
 }
 
@@ -25,7 +24,7 @@ async function saveCtx(id, messages) {
     if (!global.db) return;
     await Session.findByIdAndUpdate(
       id,
-      { messages: messages.slice(-10), updatedAt: new Date() },
+      { messages: messages.slice(-20), updatedAt: new Date() },
       { upsert: true }
     );
   } catch (_) {}
@@ -42,24 +41,37 @@ async function callHF(endpoint, messages) {
 }
 
 async function handle(api, event, prompt, registerReply) {
+  // ✅ الجلسة الجماعية: threadID بدل senderID
   const { threadID, messageID, senderID } = event;
+  const sessionKey = threadID;
 
   if (prompt.trim().toLowerCase() === "clear" || prompt.trim() === "مسح") {
-    try { await Session.findByIdAndDelete(senderID); } catch (_) {}
-    return api.sendMessage("🧹 تم مسح ذاكرة المحادثة.", threadID, null, messageID);
+    try { await Session.findByIdAndDelete(sessionKey); } catch (_) {}
+    return api.sendMessage("🧹 تم مسح ذاكرة المجموعة.", threadID, null, messageID);
   }
 
   if (!prompt.trim()) {
     return api.sendMessage(
-      "🤖 Sunken AI\n\nأرسل سؤالك مع الأمر\nمثال: .gemini ما هي عاصمة فرنسا؟\n.gemini مسح — لمسح الذاكرة",
+      "🤖 Sunken AI\n\nأرسل سؤالك مع الأمر\nمثال: .gemini ما هي عاصمة فرنسا؟\n.gemini مسح — لمسح ذاكرة المجموعة",
       threadID, null, messageID
     );
   }
 
-  const ctx = await loadCtx(senderID);
+  // ✅ جلب اسم المرسل
+  let senderDisplayName = senderID;
+  try {
+    const userInfo = await new Promise((res, rej) =>
+      api.getUserInfo(senderID, (err, data) => err ? rej(err) : res(data))
+    );
+    senderDisplayName = userInfo?.[senderID]?.name || senderID;
+  } catch (_) {}
+
+  const ctx = await loadCtx(sessionKey);
+  const userContent = `[${senderDisplayName}]: ${prompt.trim()}`;
+
   const messages = [
     ...ctx,
-    { role: "user", content: prompt.trim() },
+    { role: "user", content: userContent },
   ];
 
   let reply;
@@ -70,7 +82,6 @@ async function handle(api, event, prompt, registerReply) {
     return api.sendMessage("❌ الخادم غير متاح حالياً، حاول لاحقاً.", threadID, null, messageID);
   }
 
-  // إرسال الرد وتسجيل onReply
   api.sendMessage(reply, threadID, (err, info) => {
     if (err || !info) return;
     if (registerReply) {
@@ -80,10 +91,9 @@ async function handle(api, event, prompt, registerReply) {
     }
   }, messageID);
 
-  // حفظ الجلسة
-  await saveCtx(senderID, [
+  await saveCtx(sessionKey, [
     ...ctx,
-    { role: "user",      content: prompt.trim() },
+    { role: "user",      content: userContent },
     { role: "assistant", content: reply },
   ]);
 }
@@ -92,11 +102,11 @@ module.exports = {
   config: {
     name: "gemini",
     aliases: ["بوت", "ai", "gm"],
-    version: "8.0.0",
+    version: "9.0.0",
     author: "Sunken",
     countDown: 5,
     role: 0,
-    shortDescription: { ar: "محادثة ذكية — جلسات MongoDB" },
+    shortDescription: { ar: "محادثة ذكية جماعية — Gemini + MongoDB" },
     category: "ذكاء اصطناعي",
     guide: { ar: "{pn}gemini [سؤال]\n{pn}gemini مسح" },
   },

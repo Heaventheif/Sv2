@@ -1,4 +1,3 @@
-"use strict";
 const axios    = require("axios");
 const mongoose = require("mongoose");
 
@@ -17,7 +16,7 @@ async function loadCtx(id) {
   try {
     if (!global.db) return [];
     const doc = await Session.findById(id).lean();
-    return doc?.messages?.slice(-10) || [];
+    return doc?.messages?.slice(-20) || [];
   } catch (_) { return []; }
 }
 
@@ -26,13 +25,12 @@ async function saveCtx(id, messages) {
     if (!global.db) return;
     await Session.findByIdAndUpdate(
       id,
-      { messages: messages.slice(-10), updatedAt: new Date() },
+      { messages: messages.slice(-20), updatedAt: new Date() },
       { upsert: true }
     );
   } catch (_) {}
 }
 
-// ─── تحميل الصورة من URL وتحويلها base64 (مثل gptx) ─────────
 async function downloadImageAsBase64(url) {
   try {
     const response = await axios.get(url, {
@@ -49,7 +47,6 @@ async function downloadImageAsBase64(url) {
   }
 }
 
-// ─── كشف المرفق من event (FCA) ───────────────────────────────
 function detectAttachment(event) {
   const sources = [
     ...(event.attachments               || []),
@@ -88,14 +85,9 @@ function detectAttachment(event) {
         return { kind: "video", url };
     }
   }
-
-  if (sources.length > 0)
-    console.warn("[GROQ] attachment غير معروف:", JSON.stringify(sources[0]).substring(0, 200));
-
   return null;
 }
 
-// ─── استدعاء HF ──────────────────────────────────────────────
 async function callHF(messages) {
   const { data } = await axios.post(
     `${HF_BASE}/groq`,
@@ -106,13 +98,14 @@ async function callHF(messages) {
   return data.reply;
 }
 
-// ─── المعالج الرئيسي ─────────────────────────────────────────
 async function handle(api, event, prompt, registerReply) {
+  // ✅ الجلسة الجماعية: threadID بدل senderID
   const { threadID, messageID, senderID } = event;
+  const sessionKey = threadID;
 
   if (["clear","مسح","reset"].includes(prompt.trim().toLowerCase())) {
-    try { await Session.findByIdAndDelete(senderID); } catch (_) {}
-    return api.sendMessage("🧹 تم مسح ذاكرة المحادثة.", threadID, null, messageID);
+    try { await Session.findByIdAndDelete(sessionKey); } catch (_) {}
+    return api.sendMessage("🧹 تم مسح ذاكرة المجموعة.", threadID, null, messageID);
   }
 
   const attachment = detectAttachment(event);
@@ -121,12 +114,20 @@ async function handle(api, event, prompt, registerReply) {
     return api.sendMessage(
       "❓ اكتب سؤالك أو أرسل صورة/صوت/فيديو!\n" +
       "مثال: .ai2 ما هي عاصمة فرنسا؟\n" +
-      ".ai2 مسح — لمسح الذاكرة",
+      ".ai2 مسح — لمسح ذاكرة المجموعة",
       threadID, null, messageID
     );
   }
 
-  // ─── رسالة واحدة قابلة للتعديل ───────────────────────────────
+  // ✅ جلب اسم المرسل
+  let senderName = senderID;
+  try {
+    const userInfo = await new Promise((res, rej) =>
+      api.getUserInfo(senderID, (err, data) => err ? rej(err) : res(data))
+    );
+    senderName = userInfo?.[senderID]?.name || senderID;
+  } catch (_) {}
+
   let statusMsgId = null;
   try {
     const sent = await new Promise((resolve, reject) =>
@@ -146,18 +147,21 @@ async function handle(api, event, prompt, registerReply) {
     try { if (statusMsgId) await api.editMessage(text, statusMsgId); } catch (_) {}
   };
 
-  const ctx = await loadCtx(senderID);
+  const ctx = await loadCtx(sessionKey);
 
-  // ─── تحضير رسالة المستخدم ────────────────────────────────
+  // ✅ نضيف اسم المرسل لكل رسالة
+  const displayPrompt = prompt.trim() || (attachment?.kind === "audio" ? "فرّغ هذا الصوت" : attachment?.kind === "video" ? "حلل هذا الفيديو" : "وصف هذه الصورة");
+  const attPrefix = attachment ? `[${attachment.kind === "image" ? "صورة" : attachment.kind === "audio" ? "صوت" : "فيديو"}] ` : "";
+  const userContent = `[${senderName}]: ${attPrefix}${displayPrompt}`.trim();
+
   let userMsg;
 
   if (attachment?.kind === "image") {
-    // ✅ نحمّل الصورة هنا في Render (مثل gptx) ونرسل base64 لـ HF
     const imgData = await downloadImageAsBase64(attachment.url);
     if (imgData) {
       userMsg = {
         role: "user",
-        content: prompt.trim() || "وصف هذه الصورة",
+        content: `[${senderName}]: ${prompt.trim() || "وصف هذه الصورة"}`,
         attachment: {
           kind:        "image",
           base64:      imgData.base64,
@@ -165,19 +169,17 @@ async function handle(api, event, prompt, registerReply) {
         },
       };
     } else {
-      // فشل التحميل — نرسل نصاً فقط
-      userMsg = { role: "user", content: prompt.trim() || "وصف هذه الصورة" };
+      userMsg = { role: "user", content: `[${senderName}]: ${prompt.trim() || "وصف هذه الصورة"}` };
       await updateStatus("⚠️ تعذّر تحميل الصورة، سأجيب على النص فقط...");
     }
   } else if (attachment) {
-    // صوت أو فيديو — نرسل الـ URL لـ HF يتولاه
     userMsg = {
       role: "user",
-      content: prompt.trim() || (attachment.kind === "audio" ? "فرّغ هذا الصوت" : "حلل هذا الفيديو"),
+      content: `[${senderName}]: ${displayPrompt}`,
       attachment: { kind: attachment.kind, url: attachment.url },
     };
   } else {
-    userMsg = { role: "user", content: prompt.trim() };
+    userMsg = { role: "user", content: userContent };
   }
 
   const messages = [...ctx, userMsg];
@@ -198,9 +200,9 @@ async function handle(api, event, prompt, registerReply) {
     });
   }
 
-  await saveCtx(senderID, [
+  await saveCtx(sessionKey, [
     ...ctx,
-    { role: "user",      content: userMsg.content },
+    { role: "user",      content: userContent },
     { role: "assistant", content: reply },
   ]);
 }
@@ -209,11 +211,11 @@ module.exports = {
   config: {
     name: "groq",
     aliases: ["llma32", "ai2"],
-    version: "9.2.0",
+    version: "10.0.0",
     author: "Sunken",
     countDown: 3,
     role: 0,
-    shortDescription: { ar: "محادثة ذكية + Vision — Llama 4 Scout" },
+    shortDescription: { ar: "محادثة ذكية جماعية + Vision — Llama 4 Scout" },
     category: "ذكاء اصطناعي",
     guide: { ar: "{pn}ai2 [سؤالك]\n{pn}ai2 + صورة/صوت/فيديو\n{pn}ai2 مسح" },
   },
