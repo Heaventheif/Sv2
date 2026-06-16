@@ -72,12 +72,12 @@ async function getStream(url) {
   const ext      = url.match(/\.(mp4|mp3|webm|m4a)/i)?.[1] || "mp3";
   const filePath = path.join(os.tmpdir(), `yt_${Date.now()}.${ext}`);
 
-  const res = await axios.get(url, {
+  const res = await withRetry(() => axios.get(url, {
     responseType:     "arraybuffer",
     timeout:          120000,
     maxContentLength: 50 * 1024 * 1024,
     maxBodyLength:    50 * 1024 * 1024,
-  });
+  }));
 
   const buffer = Buffer.from(res.data);
   if (buffer.length === 0)      throw new Error("الملف فارغ.");
@@ -91,11 +91,33 @@ async function cleanTemp(filePath) {
   try { if (await fs.pathExists(filePath)) await fs.remove(filePath); } catch (_) {}
 }
 
+// ─── retry helper ──────────────────────────────────────────────
+async function withRetry(fn, retries = 3, delayMs = 4000) {
+  let lastErr;
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const status = err.response?.status;
+      // retry on 502/503/504 or network errors
+      if (status && ![502, 503, 504].includes(status)) throw err;
+      if (i < retries - 1) {
+        console.warn(`[YT] retry ${i + 1}/${retries - 1} — ${err.message}`);
+        await new Promise(r => setTimeout(r, delayMs));
+      }
+    }
+  }
+  throw lastErr;
+}
+
 // ─── v2 ────────────────────────────────────────────────────────
 async function v2(query) {
-  const url  = `${BASE}/v2/q?=${encodeURIComponent(query)}`;
-  const res  = await axios.get(url, { timeout: 30000 });
-  const data = res.data;
+  const url = `${BASE}/v2/q?=${encodeURIComponent(query)}`;
+  const data = await withRetry(async () => {
+    const res = await axios.get(url, { timeout: 30000 });
+    return res.data;
+  });
   if (Array.isArray(data)) return data[0] || {};
   if (!data || typeof data !== "object") return {};
   return data;
@@ -103,9 +125,11 @@ async function v2(query) {
 
 // ─── v3 ────────────────────────────────────────────────────────
 async function v3(query, limit = 8) {
-  const url  = `${BASE}/v3/q?=${encodeURIComponent(query)}&?=${limit}`;
-  const res  = await axios.get(url, { timeout: 25000 });
-  const data = res.data;
+  const url = `${BASE}/v3/q?=${encodeURIComponent(query)}&?=${limit}`;
+  const data = await withRetry(async () => {
+    const res = await axios.get(url, { timeout: 25000 });
+    return res.data;
+  });
   if (Array.isArray(data))               return { results: data };
   if (!data || typeof data !== "object") return { results: [] };
   if (Array.isArray(data.results))       return data;
@@ -335,7 +359,11 @@ module.exports = {
     try {
       await downloadAndSend(message, statusMsgId, chosen.url || chosen.short_url, wantMp4, api, threadID);
     } catch (e) {
-      await updateStatus("❌ " + (e.response?.data?.error || e.message));
+      const status = e.response?.status;
+      const msg = status === 502 || status === 503
+        ? "⚠️ سيرفر التحميل نائم أو مشغول، حاول مجدداً بعد لحظة."
+        : "❌ " + (e.response?.data?.error || e.message);
+      await updateStatus(msg);
     }
   }
 };
