@@ -1,341 +1,243 @@
 "use strict";
+/**
+ * yt.js — بلاجن تحميل صوت YouTube
+ * يرسل الرابط لـ HF Space / Render → يستقبل MP3 → يرسله في المجموعة
+ *
+ * الأوامر:
+ *   .yt <رابط>            ← تحميل بجودة 192k افتراضية
+ *   .yt <رابط> 320        ← تحميل بجودة 320k
+ *   .yt info <رابط>       ← عرض معلومات الفيديو فقط
+ */
 
 const axios = require("axios");
 const fs    = require("fs-extra");
-const os    = require("os");
 const path  = require("path");
+const os    = require("os");
 
-const BASE = "https://yt-dlp-stream.onrender.com/api";
+const HF_BASE = (process.env.HF_SPACE_URL || "").replace(/\/+$/, "");
 
-// ─── 7 أزواج إيموجي ────────────────────────────────────────────
-const EMOJI_PAIRS = [
-  ["👍", "❤️"], ["😆", "😮"], ["😢", "😡"],
-  ["🥰", "👏"], ["🔥", "💯"], ["😍", "😭"], ["🤔", "👀"],
-];
+// ─── التحقق من رابط YouTube ──────────────────────────────────
+const YT_REGEX =
+  /https?:\/\/(www\.)?(youtube\.com\/(watch\?v=|shorts\/|playlist\?list=)|youtu\.be\/)[\w\-]{5,}/i;
 
-// ═══════════════════════════════════════════════════════════════
-// 🕺 ستيكرز الرقص — ملفات محلية من مجلد assets/dance_stickers
-// ═══════════════════════════════════════════════════════════════
-//   • ضع ستيكراتك في:  assets/dance_stickers/
-//   • الامتدادات المدعومة:  .gif  .png  .webp
-//   • ملاحظة: GIF المتحركة تُظهر الرقص بشكل أجمل
-// ─────────────────────────────────────────────────────────────
-const STICKERS_DIR = path.join(__dirname, "..", "assets", "dance_stickers");
-const SUPPORTED_EXT = new Set([".gif", ".png", ".webp"]);
-
-let _stickerCache = null;   // يُحمَّل مرة واحدة عند أول استخدام
-
-function getStickerFiles() {
-  if (_stickerCache) return _stickerCache;
-  try {
-    const files = fs.readdirSync(STICKERS_DIR)
-      .filter(f => SUPPORTED_EXT.has(path.extname(f).toLowerCase()))
-      .map(f => path.join(STICKERS_DIR, f));
-    if (files.length === 0) {
-      console.warn("[YT/STICKER] ⚠️  مجلد الستيكرز فارغ:", STICKERS_DIR);
-      return [];
-    }
-    _stickerCache = files;
-    console.log(`[YT/STICKER] ✅ ${files.length} ستيكر جاهز`);
-    return files;
-  } catch (_) {
-    console.warn("[YT/STICKER] ⚠️  المجلد غير موجود — لن يُرسَل ستيكر");
-    return [];
-  }
+function isYoutubeUrl(text) {
+  return YT_REGEX.test(text);
 }
 
-// ─── اختيار عشوائي وإرسال كـ attachment ────────────────────────
-async function sendDanceSticker(api, threadID) {
-  const files = getStickerFiles();
-  if (files.length === 0) return;
-
-  const chosen = files[Math.floor(Math.random() * files.length)];
-  try {
-    await new Promise((resolve, reject) =>
-      api.sendMessage(
-        { attachment: fs.createReadStream(chosen) },
-        threadID,
-        (err) => err ? reject(err) : resolve()
-      )
-    );
-    console.log(`[YT/STICKER] 🕺 أُرسل: ${path.basename(chosen)}`);
-  } catch (err) {
-    console.error("[YT/STICKER] فشل إرسال الستيكر:", err.message);
-    // لا نوقف البوت — الستيكر اختياري
-  }
+// ─── استخراج أول رابط YouTube من النص ───────────────────────
+function extractUrl(text) {
+  const match = text.match(YT_REGEX);
+  return match ? match[0] : null;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// تحميل الملف على /tmp ثم إرساله كـ ReadStream
-// ═══════════════════════════════════════════════════════════════
-async function getStream(url) {
-  const ext      = url.match(/\.(mp4|mp3|webm|m4a)/i)?.[1] || "mp3";
-  const filePath = path.join(os.tmpdir(), `yt_${Date.now()}.${ext}`);
+// ─── تنسيق المدة ─────────────────────────────────────────────
+function fmtDuration(sec) {
+  if (!sec) return "غير معروف";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  return h
+    ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
+    : `${m}:${String(s).padStart(2, "0")}`;
+}
 
-  const res = await axios.get(url, {
-    responseType:     "arraybuffer",
-    timeout:          120000,
-    maxContentLength: 50 * 1024 * 1024,
-    maxBodyLength:    50 * 1024 * 1024,
+// ─── جلب معلومات الفيديو فقط ─────────────────────────────────
+async function fetchInfo(url) {
+  const { data } = await axios.get(`${HF_BASE}/yt/info`, {
+    params: { url },
+    timeout: 20000,
   });
-
-  const buffer = Buffer.from(res.data);
-  if (buffer.length === 0)      throw new Error("الملف فارغ.");
-  if (buffer.length > 26214400) throw new Error("الملف أكبر من 25MB.");
-
-  await fs.writeFile(filePath, buffer);
-  return { stream: fs.createReadStream(filePath), filePath };
-}
-
-async function cleanTemp(filePath) {
-  try { if (await fs.pathExists(filePath)) await fs.remove(filePath); } catch (_) {}
-}
-
-// ─── v2 ────────────────────────────────────────────────────────
-async function v2(query) {
-  const url  = `${BASE}/v2/q?=${encodeURIComponent(query)}`;
-  const res  = await axios.get(url, { timeout: 30000 });
-  const data = res.data;
-  if (Array.isArray(data)) return data[0] || {};
-  if (!data || typeof data !== "object") return {};
   return data;
 }
 
-// ─── v3 ────────────────────────────────────────────────────────
-async function v3(query, limit = 8) {
-  const url  = `${BASE}/v3/q?=${encodeURIComponent(query)}&?=${limit}`;
-  const res  = await axios.get(url, { timeout: 25000 });
-  const data = res.data;
-  if (Array.isArray(data))               return { results: data };
-  if (!data || typeof data !== "object") return { results: [] };
-  if (Array.isArray(data.results))       return data;
-  if (Array.isArray(data.data))          return { results: data.data };
-  return { results: [] };
+// ─── تحميل الصوت كـ MP3 ──────────────────────────────────────
+async function downloadAudio(url, quality = "192") {
+  const response = await axios.post(
+    `${HF_BASE}/yt/audio`,
+    { url, quality },
+    {
+      responseType: "arraybuffer",   // استقبال الملف كـ binary
+      timeout: 5 * 60 * 1000,        // 5 دقائق كحد أقصى
+      headers: { "Content-Type": "application/json" },
+    }
+  );
+
+  // استخراج اسم الملف والمعلومات من الهيدر
+  const contentDisp = response.headers["content-disposition"] || "";
+  const nameMatch   = contentDisp.match(/filename\*?=(?:UTF-8'')?["']?([^"';\r\n]+)/i);
+  const title       = response.headers["x-title"]    || "audio";
+  const duration    = parseInt(response.headers["x-duration"] || "0", 10);
+  const uploader    = response.headers["x-uploader"]  || "";
+  const fileName    = nameMatch ? decodeURIComponent(nameMatch[1]) : `${title}.mp3`;
+
+  // حفظ الملف مؤقتاً
+  const tmpPath = path.join(os.tmpdir(), `yt_${Date.now()}_${fileName}`);
+  await fs.writeFile(tmpPath, Buffer.from(response.data));
+
+  return { tmpPath, title, duration, uploader, fileName };
 }
 
-// ─── استخرج روابط من v2 ────────────────────────────────────────
-function parse(d) {
-  if (!d || typeof d !== "object") return {
-    title: "بدون عنوان", author: "", mp4Url: null, mp3Url: null
-  };
-  const m = (d.media && typeof d.media === "object" && !Array.isArray(d.media)) ? d.media : {};
-  function getUrl(f) {
-    if (!f) return null;
-    if (typeof f === "string") return f;
-    if (typeof f === "object" && typeof f.url === "string") return f.url;
-    return null;
+// ─── المعالج الرئيسي ─────────────────────────────────────────
+async function handle(api, event, args) {
+  const { threadID, messageID } = event;
+
+  if (!HF_BASE) {
+    return api.sendMessage(
+      "❌ HF_SPACE_URL غير مضبوط في متغيرات البيئة.",
+      threadID, null, messageID
+    );
   }
-  return {
-    title:  d.title  || "بدون عنوان",
-    author: d.author || d.channel || "",
-    mp4Url: getUrl(m.mp4) || getUrl(d.mp4) || null,
-    mp3Url: getUrl(m.mp3) || getUrl(d.mp3) || null,
-  };
-}
 
-// ═══════════════════════════════════════════════════════════════
-// تحميل وإرسال + ستيكر رقص
-// ═══════════════════════════════════════════════════════════════
-async function downloadAndSend(message, statusMsgId, query, wantMp4, api, threadID) {
-  const updateStatus = async (text) => {
-    try { if (statusMsgId) await api.editMessage(text, statusMsgId); } catch (_) {}
-  };
+  const rawText = args.join(" ").trim();
 
-  const p   = parse(await v2(query));
-  const url = wantMp4 ? p.mp4Url : p.mp3Url;
+  // ─── أمر المعلومات فقط: .yt info <رابط> ─────────────────
+  if (args[0]?.toLowerCase() === "info") {
+    const url = extractUrl(rawText);
+    if (!url) {
+      return api.sendMessage("❌ أرسل رابط YouTube مع الأمر.\nمثال: .yt info https://youtu.be/xxx", threadID, null, messageID);
+    }
+    try {
+      const info = await fetchInfo(url);
+      const msg =
+        `📺 معلومات الفيديو\n` +
+        `━━━━━━━━━━━━━━━\n` +
+        `🎵 العنوان: ${info.title || "غير معروف"}\n` +
+        `⏱ المدة: ${fmtDuration(info.duration)}\n` +
+        `👤 القناة: ${info.uploader || "غير معروف"}\n` +
+        `👁 المشاهدات: ${info.view_count?.toLocaleString("ar") || "غير معروف"}\n` +
+        `🔗 الرابط: ${url}`;
+      return api.sendMessage(msg, threadID, null, messageID);
+    } catch (e) {
+      return api.sendMessage(`❌ فشل جلب المعلومات: ${e.message?.substring(0, 80)}`, threadID, null, messageID);
+    }
+  }
 
+  // ─── أمر التحميل: .yt <رابط> [جودة] ────────────────────
+  const url = extractUrl(rawText);
   if (!url) {
-    return updateStatus(`❌ الرابط غير متاح.\n💡 جرّب النوع الآخر.`);
+    return api.sendMessage(
+      "❓ كيف تستخدم الأمر:\n\n" +
+      "🎵 تحميل MP3:\n" +
+      ".yt https://youtu.be/xxx\n" +
+      ".yt https://youtu.be/xxx 320  ← جودة أعلى\n\n" +
+      "ℹ️ معلومات فقط:\n" +
+      ".yt info https://youtu.be/xxx\n\n" +
+      "🎚 الجودات المتاحة: 128 / 192 / 256 / 320",
+      threadID, null, messageID
+    );
   }
 
-  const { stream, filePath } = await getStream(url);
+  // استخراج الجودة من الأرجومنت (إذا وُجدت)
+  const qualityMatch = rawText.match(/\b(128|192|256|320)\b/);
+  const quality      = qualityMatch ? qualityMatch[1] : "192";
+
+  // ─── رسالة انتظار ────────────────────────────────────────
+  let waitMsgId = null;
   try {
-    // ── إرسال الملف ────────────────────────────────────────
+    const sent = await new Promise((res, rej) =>
+      api.sendMessage(
+        `⏳ جاري التحميل...\n🎚 الجودة: ${quality}k\n🔗 ${url.substring(0, 50)}...`,
+        threadID,
+        (err, info) => (err ? rej(err) : res(info)),
+        messageID
+      )
+    );
+    waitMsgId = sent?.messageID;
+  } catch (_) {}
+
+  const updateWait = async (text) => {
+    try { if (waitMsgId) await api.editMessage(text, waitMsgId); } catch (_) {}
+  };
+
+  // ─── جلب الملف من السيرفر ────────────────────────────────
+  let tmpPath = null;
+  try {
+    await updateWait(`⬇️ يُحمَّل الملف من YouTube...\n🎚 الجودة: ${quality}k`);
+
+    const result = await downloadAudio(url, quality);
+    tmpPath = result.tmpPath;
+
+    await updateWait(
+      `✅ اكتمل التحميل!\n` +
+      `🎵 ${result.title}\n` +
+      `⏱ ${fmtDuration(result.duration)}\n` +
+      `👤 ${result.uploader}\n\n` +
+      `📤 جاري الإرسال...`
+    );
+
+    // ─── إرسال الملف الصوتي ──────────────────────────────
     await new Promise((resolve, reject) => {
       api.sendMessage(
         {
-          body:       `${wantMp4 ? "🎬" : "🎵"} ${p.title}\n📺 ${p.author}`.trim(),
-          attachment: stream
+          body: `🎵 ${result.title}\n⏱ ${fmtDuration(result.duration)} | 🎚 ${quality}kbps`,
+          attachment: fs.createReadStream(tmpPath),
         },
         threadID,
-        (err) => err ? reject(err) : resolve()
+        (err) => (err ? reject(err) : resolve()),
+        messageID
       );
     });
 
-    // ── حذف رسالة الانتظار (إصلاح: threadID مطلوب) ────────
-    if (statusMsgId) {
-      try { await api.unsendMessage(statusMsgId, threadID); } catch (_) {}
+    // احذف رسالة الانتظار بعد الإرسال الناجح
+    try { if (waitMsgId) api.unsendMessage(waitMsgId, () => {}); } catch (_) {}
+
+  } catch (e) {
+    console.error("[YT]", e.message);
+
+    // هل الخطأ من السيرفر ويحتوي على JSON؟
+    let errMsg = e.message || "خطأ غير معروف";
+    if (e.response?.data) {
+      try {
+        const errData = JSON.parse(
+          Buffer.isBuffer(e.response.data)
+            ? e.response.data.toString()
+            : JSON.stringify(e.response.data)
+        );
+        errMsg = errData.error || errMsg;
+      } catch (_) {}
     }
 
-    // 🕺 ستيكر رقص من المجلد المحلي
-    await sendDanceSticker(api, threadID);
-
+    await updateWait(
+      `❌ فشل التحميل:\n${errMsg.substring(0, 150)}\n\n` +
+      `💡 تأكد أن الفيديو:\n` +
+      `• متاح للعموم\n` +
+      `• مدته أقل من 50 دقيقة\n` +
+      `• ليس محمياً بحقوق النشر`
+    );
   } finally {
-    await cleanTemp(filePath);
+    // تنظيف الملف المؤقت
+    if (tmpPath) {
+      fs.unlink(tmpPath).catch(() => {});
+    }
   }
 }
 
-// ═══════════════════════════════════════════════════════════════
+// ─── تصدير البلاجن ───────────────────────────────────────────
 module.exports = {
   config: {
-    name:      "yt",
-    aliases:   ["ytdl", "youtube", "mp3", "mp4", "yts"],
-    version:   "3.2",
-    role:      0,
-    countDown: 15,
-    category:  "download",
-    guide: { en:
-      "{pn} <اسم>         — بحث وعرض قائمة\n" +
-      "{pn} mp4 <اسم>     — بحث وعرض قائمة (فيديو)\n" +
-      "{pn} <رابط>        — تحميل مباشر MP3\n" +
-      "{pn} mp4 <رابط>   — تحميل مباشر MP4"
-    }
+    name:             "yt",
+    aliases:          ["ytmp3", "يوتيوب", "ساوند"],
+    version:          "1.0.0",
+    author:           "Sunken",
+    countDown:        10,
+    role:             0,
+    shortDescription: { ar: "تحميل صوت YouTube بصيغة MP3" },
+    longDescription: {
+      ar:
+        "حمّل أي فيديو من YouTube كملف MP3\n" +
+        "الجودات: 128 / 192 / 256 / 320 kbps\n" +
+        "الحد الأقصى: 50 دقيقة",
+    },
+    category: "تحميل",
+    guide: {
+      ar:
+        "{pn}yt <رابط>           ← تحميل (192k افتراضي)\n" +
+        "{pn}yt <رابط> 320       ← جودة أعلى\n" +
+        "{pn}yt info <رابط>      ← معلومات فقط",
+    },
   },
 
-  onStart: async ({ api, message, args, event }) => {
-    const { threadID, messageID } = event;
-
-    if (!args[0]) return message.reply(
-      "📥 يوتيوب دونلودر\n\n" +
-      "🎵 yt <اسم أغنية>    — بحث وقائمة\n" +
-      "🎬 yt mp4 <اسم>      — بحث وقائمة فيديو\n" +
-      "🔗 yt <رابط>         — تحميل مباشر"
-    );
-
-    const sub     = args[0].toLowerCase();
-    const wantMp4 = sub === "mp4";
-    const hasFlag = ["mp4", "mp3"].includes(sub);
-    const query   = (hasFlag ? args.slice(1) : args).join(" ").trim();
-
-    if (!query) return message.reply("❌ أرسل اسم الأغنية أو الرابط.");
-
-    const isUrl = query.startsWith("http://") || query.startsWith("https://");
-    if (isUrl) {
-      let statusMsgId = null;
-      try {
-        const sent = await new Promise((resolve, reject) =>
-          api.sendMessage(
-            `⏳ ${wantMp4 ? "🎬 جارٍ تحميل الفيديو..." : "🎵 جارٍ تحميل الصوت..."}`,
-            threadID,
-            (err, info) => err ? reject(err) : resolve(info),
-            messageID
-          )
-        );
-        statusMsgId = sent?.messageID;
-      } catch (_) {}
-
-      try {
-        await downloadAndSend(message, statusMsgId, query, wantMp4, api, threadID);
-      } catch (e) {
-        try { if (statusMsgId) await api.editMessage("❌ " + (e.response?.data?.error || e.message), statusMsgId); } catch (_) {}
-      }
-      return;
-    }
-
-    let statusMsgId = null;
-    try {
-      const sent = await new Promise((resolve, reject) =>
-        api.sendMessage(
-          `🔍 جارٍ البحث عن "${query}"...`,
-          threadID,
-          (err, info) => err ? reject(err) : resolve(info),
-          messageID
-        )
-      );
-      statusMsgId = sent?.messageID;
-    } catch (_) {}
-
-    const updateStatus = async (text) => {
-      try { if (statusMsgId) await api.editMessage(text, statusMsgId); } catch (_) {}
-    };
-
-    try {
-      const res = await v3(query, 7);
-      if (!res.results?.length) return updateStatus("❌ لم تُعثر على نتائج.");
-
-      const results = res.results.slice(0, 7);
-      let text = `🎵 نتائج البحث:\n─────────────────\n`;
-      results.forEach((v, i) => {
-        const [mp3Emoji, mp4Emoji] = EMOJI_PAIRS[i];
-        text += `${i + 1}. ${v.title}\n   ⏱ ${v.duration || "--"}\n   ${mp3Emoji} mp3  |  ${mp4Emoji} mp4\n─────────────────\n`;
-      });
-      text += `🔢 رُد بالرقم، أو تفاعل بإيموجي مناسب (mp3/mp4)\n⏳ تنتهي بعد دقيقتين.`;
-
-      await updateStatus(text);
-
-      if (statusMsgId) {
-        global.Kagenou.replies[statusMsgId] = {
-          commandName: "yt",
-          author:      event.senderID,
-          results,
-          wantMp4,
-          statusMsgId,
-          timestamp:   Date.now()
-        };
-
-        global.client.reactionListener[statusMsgId] = {
-          author: event.senderID,
-          callback: async ({ api, event: reactEvent }) => {
-            const reaction = reactEvent.reaction;
-            const idx = EMOJI_PAIRS.findIndex(([mp3, mp4]) => reaction === mp3 || reaction === mp4);
-            if (idx === -1 || idx >= results.length) return;
-
-            const wantMp4Reaction = reaction === EMOJI_PAIRS[idx][1];
-            const chosen = results[idx];
-
-            delete global.client.reactionListener[statusMsgId];
-            delete global.Kagenou.replies[statusMsgId];
-
-            await updateStatus(`⏳ جارٍ تحميل: ${chosen.title}...`);
-            try {
-              await downloadAndSend(message, statusMsgId, chosen.url || chosen.short_url, wantMp4Reaction, api, threadID);
-            } catch (e) {
-              await updateStatus("❌ " + (e.response?.data?.error || e.message));
-            }
-          }
-        };
-
-        setTimeout(() => {
-          if (global.client.reactionListener[statusMsgId])
-            delete global.client.reactionListener[statusMsgId];
-        }, 120000);
-      }
-    } catch (e) {
-      await updateStatus("❌ " + (e.response?.data?.error || e.message));
-    }
+  onStart: async ({ api, event, args }) => {
+    await handle(api, event, args);
   },
-
-  onReply: async ({ api, event, Reply, message }) => {
-    if (event.senderID !== Reply.author || !Reply.results) return;
-
-    const { threadID } = event;
-    const parts   = event.body?.trim().split(/\s+/) || [];
-    const idx     = parseInt(parts[0]) - 1;
-    const wantMp4 = parts[1]?.toLowerCase() === "mp4"
-      ? true
-      : parts[1]?.toLowerCase() === "mp3"
-        ? false
-        : Reply.wantMp4 ?? false;
-
-    if (isNaN(idx) || idx < 0 || idx >= Reply.results.length)
-      return message.reply(`❌ أرسل رقماً من 1 إلى ${Reply.results.length}`);
-
-    const chosen      = Reply.results[idx];
-    const statusMsgId = Reply.statusMsgId;
-
-    delete global.client.reactionListener[statusMsgId];
-    delete global.Kagenou.replies[statusMsgId];
-
-    const updateStatus = async (text) => {
-      try { if (statusMsgId) await api.editMessage(text, statusMsgId); } catch (_) {}
-    };
-
-    await updateStatus(`⏳ جارٍ تحميل: ${chosen.title}...`);
-
-    try {
-      await downloadAndSend(message, statusMsgId, chosen.url || chosen.short_url, wantMp4, api, threadID);
-    } catch (e) {
-      await updateStatus("❌ " + (e.response?.data?.error || e.message));
-    }
-  }
 };
