@@ -189,8 +189,8 @@ async function downloadAndSend(api, threadID, statusMsgId, ytUrl, wantMp4) {
     // احذف رسالة الانتظار
     try { if (statusMsgId) api.unsendMessage(statusMsgId, () => {}); } catch (_) {}
 
-    // 🕺 ستيكر رقص
-    await sendDanceSticker(api, threadID);
+    // 🕺 ستيكر رقص — فقط عند تحميل mp3 (الصوت)
+    if (!wantMp4) await sendDanceSticker(api, threadID);
 
   } catch (err) {
     let msg = err.message || "خطأ غير معروف";
