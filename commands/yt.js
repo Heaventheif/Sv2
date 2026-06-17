@@ -34,7 +34,7 @@ module.exports = {
     const { threadID, messageID, senderID } = event;
 
     if (!HF) {
-      return message.reply("❌ متغير البيئة HF_SPACE_URL غير مضاف أو غير مضبوط في إعدادات Render.");
+      return message.reply("❌ متغير البيئة HF_SPACE_URL غير مضاف في إعدادات Render.");
     }
 
     let query = args.join(" ").trim();
@@ -57,7 +57,6 @@ module.exports = {
       if (isYtUrl(query)) {
         await update("📥 تم رصد رابط مباشر! جاري معالجة واستخراج ملف الميديا الصوتي...");
         const fakeChosen = { id: query, title: "مقطع من رابط مباشر", author: "YouTube" };
-        
         return await downloadAndSend({
           api, threadID, messageID, statusMsgId, update,
           chosen: fakeChosen, wantMp4: false, senderID
@@ -78,7 +77,7 @@ module.exports = {
         const item = results[i];
         replyBody += `${EMOJIS[i][0]} ${item.title}\n👤 القناة: ${item.author || "غير معروف"} | ⏱️ ${item.duration || "??:??"}\n\n`;
       }
-      replyBody += `════════════════════\n📥 أرسل [رقم المقطع] لتحميله كـ MP3 (صوت).\n💡 أرسل [الرقم + mp4] لتحميله كـ فيديو.\n✨ مثال: 1 mp4`;
+      replyBody += `════════════════════\n📥 أرسل [رقم المقطع] لتحميله كـ MP3.\n💡 أرسل [الرقم + mp4] لتحميله كـ فيديو.\n✨ مثال: 1 mp4`;
 
       await update(replyBody);
 
@@ -145,7 +144,7 @@ async function downloadAndSend({ api, threadID, messageID, statusMsgId, update, 
   const tempFilePath = path.join(os.tmpdir(), `sunken_media_${Date.now()}_${senderID}.${fileExt}`);
 
   try {
-    await update(`📥 جاري معالجة المقطع وتحميله سحابياً...\nالصيغة الحالية: [ ${fileExt.toUpperCase()} ] ⏳\nيرجى الانتظار، قد يستغرق الأمر لحظات...`);
+    await update(`📥 جاري استخراج الميديا وتحميلها سحابياً...\nالصيغة الحالية: [ ${fileExt.toUpperCase()} ] ⏳`);
 
     const response = await axios({
       method: "POST",
@@ -155,7 +154,7 @@ async function downloadAndSend({ api, threadID, messageID, statusMsgId, update, 
       timeout: 240000
     });
 
-    await update(`⚡ اكتمل الاستخراج بنجاح! جاري تنزيل الملف للبوت...`);
+    await update(`⚡ اكتمل الاستخراج السحابي! جاري كتابة الملف مؤقتاً لتجهيز الرفع...`);
 
     const writer = fs.createWriteStream(tempFilePath);
     response.data.pipe(writer);
@@ -170,21 +169,20 @@ async function downloadAndSend({ api, threadID, messageID, statusMsgId, update, 
       const content = await fs.readFile(tempFilePath, "utf-8");
       if (content.includes("error") || content.startsWith("{")) {
         const errJson = JSON.parse(content);
-        throw new Error(errJson.error || "فشل معالجة هذا المقطع.");
+        throw new Error(errJson.error || "فشل سيرفر الباك-إند في معالجة هذا المقطع.");
       }
     }
 
     await update("📤 جاري رفع الملف الآن إلى خوادم فيسبوك...");
 
     const msgToSend = {
-      body: `🎵 تم التحميل بنجاح!\n\n📌 العنوان: ${chosen.title}\nالصيغة: ${fileExt.toUpperCase()}`,
+      body: `🎵 تم التحميل بنجاح!\n\n📌 العنوان: ${chosen.title}\n👤 القناة: ${chosen.author || "YouTube"}`,
       attachment: fs.createReadStream(tempFilePath)
     };
 
     await api.sendMessage(msgToSend, threadID, async (err) => {
       if (err) {
-        console.error("خطأ رفع المرفق:", err);
-        await update(`❌ فشل إرسال الملف كمرفق.\n💡 السبب الشائع: حجم الملف كبير جداً ويتجاوز حد فيسبوك (25MB).`);
+        await update(`❌ فشل إرسال الملف كمرفق (قد يتجاوز 25MB حد فيسبوك).`);
       } else {
         try { await api.unsendMessage(statusMsgId); } catch (e) {}
       }
@@ -192,7 +190,7 @@ async function downloadAndSend({ api, threadID, messageID, statusMsgId, update, 
     }, messageID);
 
   } catch (error) {
-    console.error("خطأ في دورة العمل:", error);
+    console.error("خطأ في دورة عمل yt.js:", error);
     try { if (fs.existsSync(tempFilePath)) await fs.unlink(tempFilePath); } catch (e) {}
     await update(`❌ فشل التحميل:\n${error.message}`);
   }
