@@ -21,7 +21,8 @@
     "multer": "^1.4.5-lts.1",
     "node-cache": "^5.1.2",
     "openai": "^4.86.1",
-    "totp-generator": "^1.0.0"
+    "totp-generator": "^1.0.0",
+    "@vreden/youtube_scraper": "latest"
   },
   "engines": {
     "node": "22.x"
