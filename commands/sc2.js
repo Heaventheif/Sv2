@@ -1,6 +1,7 @@
 "use strict";
 
 const play = require("play-dl");
+const axios = require("axios");
 const fs   = require("fs-extra");
 const os   = require("os");
 const path = require("path");
@@ -9,7 +10,6 @@ let _initialized = false;
 async function ensureInit() {
   if (_initialized) return;
   try {
-    // الطريقة الصحيحة للحصول على client_id مجاناً
     const clientID = await play.getFreeClientID();
     await play.setToken({ soundcloud: { client_id: clientID } });
   } catch {
@@ -45,32 +45,72 @@ async function sendDanceSticker(api, threadID) {
   } catch (_) {}
 }
 
-async function searchAndStream(query) {
+async function searchAndDownload(query) {
   await ensureInit();
 
+  // 1. بحث
   const results = await play.search(query, {
     source: { soundcloud: "tracks" },
     limit: 1,
   });
-
   if (!results?.length) throw new Error("لم تُوجد نتائج على SoundCloud");
 
   const track = results[0];
+
+  // 2. جيب الـ stream object للحصول على معلومات فقط
   const streamData = await play.stream(track.url, { quality: 0 });
 
-  const filePath = path.join(os.tmpdir(), `scprev_${Date.now()}.mp3`);
+  // 3. استخرج الـ URL المباشر من الـ stream
+  //    play-dl يضع الـ URL في streamData.url أو في stream._readableState.url
+  let directUrl = streamData.url
+    || streamData.stream?.url
+    || streamData.stream?._readableState?.url;
 
-  await new Promise((res, rej) => {
-    const out    = fs.createWriteStream(filePath);
-    const source = streamData.stream;
-    source.pipe(out);
-    out.on("finish", res);
-    out.on("error",  rej);
-    source.on("error", rej);
+  if (!directUrl) {
+    // طريقة بديلة: نستخدم الـ stream مباشرة عبر pipe مع timeout
+    const filePath = path.join(os.tmpdir(), `sc2_${Date.now()}.mp3`);
+    await new Promise((res, rej) => {
+      const timeout = setTimeout(() => {
+        try { streamData.stream.destroy(); } catch(_){}
+        rej(new Error("انتهت مهلة التحميل"));
+      }, 30000);
+
+      const out = fs.createWriteStream(filePath);
+      streamData.stream.pipe(out);
+      out.on("finish", () => { clearTimeout(timeout); res(); });
+      out.on("error",  (e) => { clearTimeout(timeout); rej(e); });
+      streamData.stream.on("error", (e) => { clearTimeout(timeout); rej(e); });
+    });
+
+    const stat = await fs.stat(filePath);
+    if (stat.size < 1000) throw new Error("الملف فارغ أو ناقص");
+
+    return {
+      filePath,
+      title:      track.name || "بدون عنوان",
+      artist:     track.publisher_metadata?.artist || track.user?.username || "",
+      durationMs: (track.durationInSec || 0) * 1000,
+    };
+  }
+
+  // 4. حمّل بـ axios (أكثر موثوقية من pipe)
+  const filePath = path.join(os.tmpdir(), `sc2_${Date.now()}.mp3`);
+
+  const dlRes = await axios.get(directUrl, {
+    responseType:     "arraybuffer",
+    timeout:          60000,
+    maxContentLength: 15 * 1024 * 1024,
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    },
   });
 
+  const buffer = Buffer.from(dlRes.data);
+  if (!buffer.length) throw new Error("ملف الصوت فارغ");
+  await fs.writeFile(filePath, buffer);
+
   const stat = await fs.stat(filePath);
-  if (stat.size === 0) throw new Error("الملف فارغ");
+  if (stat.size < 1000) throw new Error("ملف الصوت ناقص");
 
   return {
     filePath,
@@ -93,8 +133,8 @@ async function cleanTemp(p) {
 module.exports = {
   config: {
     name:      "sc2",
-    aliases:   ["بريفيو2"],   // ← أزلنا "مقطع" لأنه موجود في sc.js
-    version:   "3.2",
+    aliases:   ["بريفيو2"],
+    version:   "3.3",
     role:      0,
     countDown: 10,
     category:  "media",
@@ -135,12 +175,12 @@ module.exports = {
     try {
       await update("🎵 جارٍ تحميل المقطع...");
 
-      const result = await searchAndStream(query);
+      const result = await searchAndDownload(query);
       filePath = result.filePath;
 
       const body =
         `🎵 ${result.title}` +
-        `${result.artist     ? `\n👤 ${result.artist}`            : ""}` +
+        `${result.artist     ? `\n👤 ${result.artist}`               : ""}` +
         `${result.durationMs ? `\n${fmtDuration(result.durationMs)}` : ""}` +
         `\n🔊 مقطع Preview — SoundCloud`;
 
@@ -156,6 +196,7 @@ module.exports = {
       await sendDanceSticker(api, threadID);
 
     } catch (err) {
+      console.error("[sc2] خطأ:", err.message);
       await update(`❌ ${err.message?.substring(0, 200) || "خطأ غير معروف"}`);
     } finally {
       await cleanTemp(filePath);
