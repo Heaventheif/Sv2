@@ -1,25 +1,15 @@
 "use strict";
+
 /**
- * yt.js v5.0
+ * yt.js v5.0 — النسخة الكاملة والثابتة لمنصة Render
  * ══════════════════════════════════════════════════════════════
- * التدفق الكامل:
+ * متوافق تماماً وبدون أي تعديل على سيرفر بايثون (yt.py) أو الـ Worker (worker.js)
+ * * التدفق المشترك:
+ * 1. البحث: Render (yt.js) ── POST {"query"} ──> HF (yt.py) ──> CF Worker ──> YouTube
+ * 2. التحميل: Render (yt.js) ── POST {"url"} ──> HF (yt.py) [يحمل ويحول عبر FFmpeg] ──> يعود كـ FileResponse لـ Render
  *
- *   المستخدم (فيسبوك)
- *       ↓ أمر بحث
- *   yt.js  →  POST {HF}/yt/search  {"query":"..."}
- *       ↓
- *   yt.py  →  GET CF_WORKER/yt/search?q=...  →  YouTube
- *       ↓ نتائج JSON
- *   yt.js  →  يعرض قائمة 10 نتائج
- *       ↓ المستخدم يختار (رقم أو إيموجي)
- *   yt.js  →  POST {HF}/yt/audio|video  {"url":"..."}
- *       ↓
- *   yt.py  →  yt-dlp عبر CF Worker proxy  →  YouTube
- *       ↓ FileResponse (MP3/MP4)
- *   yt.js  →  يرسل الملف + ستيكر للمستخدم
- *
- * متغيرات البيئة المطلوبة:
- *   HF_SPACE_URL  — عنوان HF Space مثال: https://user-bot.hf.space
+ * متغيرات البيئة المطلوبة في Render:
+ * HF_SPACE_URL : رابط السيرفر في Hugging Face (مثال: https://user-space.hf.space)
  * ══════════════════════════════════════════════════════════════
  */
 
@@ -28,359 +18,248 @@ const fs    = require("fs-extra");
 const os    = require("os");
 const path  = require("path");
 
-// ─── عنوان HF Space (كل الطلبات تمر عبره) ───────────────────
+// جلب عنوان الـ Hugging Face Space وتنظيفه من الشرطات المائلة الزائدة
 const HF = (process.env.HF_SPACE_URL || "").replace(/\/+$/, "");
 
-// ─── 10 أزواج إيموجي (mp3 | mp4) ────────────────────────────
-const EMOJI_PAIRS = [
-  ["👍", "❤️"], ["😆", "😮"], ["😢", "😡"],
-  ["🥰", "👏"], ["🔥", "💯"], ["😍", "😭"],
-  ["🤔", "👀"], ["🎉", "🎊"], ["💙", "💜"], ["🌟", "⭐"],
+// مصفوفة الرموز التعبيرية لعرض الأرقام (الرد بالنص أو عبر التفاعل)
+const EMOJIS = [
+  ["1️⃣", "❶"], ["2️⃣", "❷"], ["3️⃣", "❸"], ["4️⃣", "❹"], ["5️⃣", "❺"],
+  ["6️⃣", "❻"], ["7️⃣", "❼"], ["8️⃣", "❽"], ["9️⃣", "❾"], ["🔟", "❿"]
 ];
 
-// ═══════════════════════════════════════════════════════════════
-// 🕺  ستيكرز الرقص
-// ═══════════════════════════════════════════════════════════════
-const STICKERS_DIR  = path.join(__dirname, "..", "assets", "dance_stickers");
-const SUPPORTED_EXT = new Set([".gif", ".png", ".webp"]);
-let _stickerCache   = null;
-
-function getStickerFiles() {
-  if (_stickerCache) return _stickerCache;
-  try {
-    const files = fs.readdirSync(STICKERS_DIR)
-      .filter(f => SUPPORTED_EXT.has(path.extname(f).toLowerCase()))
-      .map(f => path.join(STICKERS_DIR, f));
-    if (!files.length) {
-      console.warn("[YT/STICKER] ⚠️  مجلد الستيكرز فارغ:", STICKERS_DIR);
-      return [];
-    }
-    _stickerCache = files;
-    console.log(`[YT/STICKER] ✅ ${files.length} ستيكر جاهز`);
-    return files;
-  } catch (_) {
-    console.warn("[YT/STICKER] ⚠️  المجلد غير موجود — لن يُرسَل ستيكر");
-    return [];
-  }
+// التعبير النمطي للتحقق من روابط يوتيوب المباشرة
+const YT_URL_RE = /(https?:\/\/)?(www\.)?(youtube\.com\/(watch\?v=|shorts\/|playlist\?list=)|youtu\.be\/)[\w\-]{5,}/;
+function isYtUrl(s) {
+  return YT_URL_RE.test(s);
 }
 
-async function sendDanceSticker(api, threadID) {
-  const files = getStickerFiles();
-  if (!files.length) return;
-  const chosen = files[Math.floor(Math.random() * files.length)];
-  try {
-    await new Promise((res, rej) =>
-      api.sendMessage(
-        { attachment: fs.createReadStream(chosen) },
-        threadID,
-        err => err ? rej(err) : res()
-      )
-    );
-    console.log(`[YT/STICKER] 🕺 أُرسل: ${path.basename(chosen)}`);
-  } catch (err) {
-    console.error("[YT/STICKER] فشل إرسال الستيكر:", err.message);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// 🔍  البحث — يُرسَل لـ yt.py الذي يُوجّهه لـ CF Worker
-// yt.js  →  POST {HF}/yt/search  →  yt.py  →  CF Worker  →  YouTube
-// ═══════════════════════════════════════════════════════════════
-async function ytSearch(query, limit = 10) {
-  if (!HF) throw new Error("HF_SPACE_URL غير مضبوط في متغيرات البيئة");
-
-  const { data } = await axios.post(
-    `${HF}/yt/search`,
-    { query, limit },
-    { timeout: 30000, headers: { "Content-Type": "application/json" } }
-  );
-
-  if (!data.results?.length) throw new Error("لا توجد نتائج");
-  return data.results;  // [{title, url, duration, uploader, id}, ...]
-}
-
-// ═══════════════════════════════════════════════════════════════
-// ⬇️  تحميل — يُرسَل الرابط المختار لـ yt.py الذي يُحمّله عبر CF Worker
-// yt.js  →  POST {HF}/yt/audio|video  →  yt.py  →  CF proxy  →  YouTube
-// ═══════════════════════════════════════════════════════════════
-async function downloadFromHF(ytUrl, wantMp4) {
-  if (!HF) throw new Error("HF_SPACE_URL غير مضبوط");
-
-  const endpoint = wantMp4 ? "/yt/video" : "/yt/audio";
-  const ext      = wantMp4 ? "mp4" : "mp3";
-  const filePath = path.join(os.tmpdir(), `yt_${Date.now()}.${ext}`);
-
-  const res = await axios.post(
-    `${HF}${endpoint}`,
-    { url: ytUrl },
-    {
-      responseType:     "arraybuffer",
-      timeout:          5 * 60 * 1000,           // 5 دقائق
-      maxContentLength: 45 * 1024 * 1024,
-      maxBodyLength:    45 * 1024 * 1024,
-      headers: { "Content-Type": "application/json" },
-    }
-  );
-
-  // تحقق: هل الرد JSON خطأ من yt.py؟
-  const ct = res.headers["content-type"] || "";
-  if (ct.includes("application/json")) {
-    const errText = Buffer.from(res.data).toString();
-    let errMsg = "خطأ غير معروف من HF Space";
-    try { errMsg = JSON.parse(errText).error || errMsg; } catch (_) {}
-    throw new Error(errMsg);
-  }
-
-  const buf = Buffer.from(res.data);
-  if (!buf.length) throw new Error("الملف فارغ");
-
-  await fs.writeFile(filePath, buf);
-
-  return {
-    stream:   fs.createReadStream(filePath),
-    filePath,
-    title:    decodeHeader(res.headers["x-title"])    || "media",
-    duration: res.headers["x-duration"]               || "0",
-    uploader: decodeHeader(res.headers["x-uploader"]) || "",
-  };
-}
-
-function decodeHeader(h) {
-  if (!h) return "";
-  try { return decodeURIComponent(h); } catch (_) { return h; }
-}
-
-async function cleanTemp(p) {
-  try { if (p && await fs.pathExists(p)) await fs.remove(p); } catch (_) {}
-}
-
-// ═══════════════════════════════════════════════════════════════
-// 📤  تحميل + إرسال الملف + ستيكر رقص
-// ═══════════════════════════════════════════════════════════════
-async function downloadAndSend(api, threadID, statusMsgId, ytUrl, wantMp4) {
-  const update = async (t) => {
-    try { if (statusMsgId) await api.editMessage(t, statusMsgId); } catch (_) {}
-  };
-
-  let filePath = null;
-  try {
-    const dl = await downloadFromHF(ytUrl, wantMp4);
-    filePath  = dl.filePath;
-
-    const fmtDur = (sec) => {
-      const s = parseInt(sec) || 0;
-      if (!s) return "";
-      const m = Math.floor(s / 60), ss = s % 60;
-      return ` ⏱ ${m}:${String(ss).padStart(2, "0")}`;
-    };
-
-    const body =
-      `${wantMp4 ? "🎬" : "🎵"} ${dl.title}` +
-      `${fmtDur(dl.duration)}` +
-      `${dl.uploader ? `\n📺 ${dl.uploader}` : ""}` +
-      `\n🎚 ${wantMp4 ? "360p" : "128kbps"}`;
-
-    await new Promise((res, rej) =>
-      api.sendMessage(
-        { body, attachment: dl.stream },
-        threadID,
-        err => err ? rej(err) : res()
-      )
-    );
-
-    // احذف رسالة الانتظار
-    try { if (statusMsgId) api.unsendMessage(statusMsgId, () => {}); } catch (_) {}
-
-    // 🕺 ستيكر رقص
-    await sendDanceSticker(api, threadID);
-
-  } catch (err) {
-    let msg = err.message || "خطأ غير معروف";
-    if (err.response?.data) {
-      try {
-        const t = Buffer.isBuffer(err.response.data)
-          ? err.response.data.toString()
-          : JSON.stringify(err.response.data);
-        msg = JSON.parse(t).error || msg;
-      } catch (_) {}
-    }
-    await update(`❌ ${msg.substring(0, 160)}`);
-  } finally {
-    await cleanTemp(filePath);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// 📋  بناء نص قائمة البحث
-// ═══════════════════════════════════════════════════════════════
-function buildListText(results) {
-  let text = `🎵 نتائج البحث:\n${"─".repeat(22)}\n`;
-  results.forEach((v, i) => {
-    const [mp3E, mp4E] = EMOJI_PAIRS[i];
-    text +=
-      `${i + 1}. ${v.title}\n` +
-      `   ⏱ ${v.duration || "--"}  📺 ${v.uploader || ""}\n` +
-      `   ${mp3E} mp3  |  ${mp4E} mp4\n` +
-      `${"─".repeat(22)}\n`;
-  });
-  text += `🔢 رُد بالرقم (مثال: 3 mp4)\nأو تفاعل بالإيموجي\n⏳ تنتهي بعد دقيقتين`;
-  return text;
-}
-
-// ═══════════════════════════════════════════════════════════════
 module.exports = {
   config: {
-    name:      "yt",
-    aliases:   ["ytdl", "youtube", "mp3", "mp4", "يوتيوب"],
-    version:   "5.0",
-    role:      0,
-    countDown: 15,
-    category:  "download",
-    guide: { en:
-      "{pn} <اسم>        — بحث + قائمة 10 نتائج\n" +
-      "{pn} mp4 <اسم>    — بحث + قائمة (فيديو)\n" +
-      "{pn} <رابط>       — تحميل مباشر MP3 128k\n" +
-      "{pn} mp4 <رابط>   — تحميل مباشر MP4 360p"
-    }
+    name: "yt",
+    version: "5.0",
+    author: "Heaventheif",
+    cooldowns: 5,
+    role: 0,
+    shortDescription: "البحث والتحميل من YouTube عبر السيرفر السحابي",
+    longDescription: "يبحث في يوتيوب ويعرض قائمة نتائج، عند الرد برقم المقطع يتم تحميله كـ MP3 أو MP4 عبر سيرفر HF.",
+    category: "media",
+    guide: "{p}yt <اسم المقطع أو الرابط>\nمثال: {p}yt سورة البقرة\nللتحميل المباشر: {p}yt https://youtu.be/xxxx"
   },
 
   // ─────────────────────────────────────────────────────────────
-  onStart: async ({ api, message, args, event }) => {
-    const { threadID, messageID } = event;
+  // 1. استقبال الأمر والبحث (onStart)
+  // ─────────────────────────────────────────────────────────────
+  onStart: async ({ api, event, args, message }) => {
+    const { threadID, messageID, senderID } = event;
 
-    if (!HF) return message.reply("❌ HF_SPACE_URL غير مضبوط في متغيرات البيئة.");
-    if (!args[0]) return message.reply(
-      "📥 يوتيوب دونلودر\n\n" +
-      "🎵 .yt <اسم أغنية>    — بحث وقائمة\n" +
-      "🎬 .yt mp4 <اسم>      — بحث وقائمة فيديو\n" +
-      "🔗 .yt <رابط>         — تحميل مباشر MP3\n" +
-      "🎬 .yt mp4 <رابط>     — تحميل مباشر MP4\n\n" +
-      "🎚 الجودة: صوت 128kbps | فيديو 360p"
-    );
-
-    const sub     = args[0].toLowerCase();
-    const wantMp4 = sub === "mp4";
-    const hasFlag = ["mp4", "mp3"].includes(sub);
-    const query   = (hasFlag ? args.slice(1) : args).join(" ").trim();
-
-    if (!query) return message.reply("❌ أرسل اسم الأغنية أو الرابط.");
-
-    const isUrl = /^https?:\/\//i.test(query);
-
-    // ── تحميل مباشر برابط ───────────────────────────────────
-    if (isUrl) {
-      let statusMsgId = null;
-      try {
-        const sent = await new Promise((res, rej) =>
-          api.sendMessage(
-            `⏳ ${wantMp4 ? "🎬 جارٍ تحميل الفيديو 360p..." : "🎵 جارٍ تحميل الصوت 128k..."}`,
-            threadID,
-            (err, info) => err ? rej(err) : res(info),
-            messageID
-          )
-        );
-        statusMsgId = sent?.messageID;
-      } catch (_) {}
-      await downloadAndSend(api, threadID, statusMsgId, query, wantMp4);
-      return;
+    if (!HF) {
+      return message.reply("❌ متغير البيئة HF_SPACE_URL غير مضاف أو غير مضبوط في إعدادات Render.");
     }
 
-    // ── بحث بالاسم ──────────────────────────────────────────
-    let statusMsgId = null;
-    try {
-      const sent = await new Promise((res, rej) =>
-        api.sendMessage(
-          `🔍 جارٍ البحث عن "${query}"...`,
-          threadID,
-          (err, info) => err ? rej(err) : res(info),
-          messageID
-        )
-      );
-      statusMsgId = sent?.messageID;
-    } catch (_) {}
+    let query = args.join(" ").trim();
 
-    const update = async (t) => {
-      try { if (statusMsgId) await api.editMessage(t, statusMsgId); } catch (_) {}
+    // إذا لم يتم إدخال نص، تحقق مما إذا كان هناك رد على رسالة نصية أو رابط
+    if (!query && event.type === "message_reply") {
+      query = (event.messageReply.body || "").trim();
+    }
+
+    if (!query) {
+      return message.reply("⚠️ يرجى كتابة نص البحث أو وضع رابط مقطع يوتيوب.");
+    }
+
+    // إرسال رسالة الحالة الأولى للمستخدم
+    const { messageID: statusMsgId } = await message.reply("🔍 جاري فحص الطلب والاتصال بالسيرفر السحابي...");
+
+    const update = async (text) => {
+      try { await api.editMessage(text, statusMsgId); } catch (e) {}
     };
 
     try {
-      const results = await ytSearch(query, 10);
-      await update(buildListText(results));
-
-      if (statusMsgId) {
-        // onReply
-        if (global.Kagenou?.replies) {
-          global.Kagenou.replies[statusMsgId] = {
-            commandName: "yt",
-            author:      event.senderID,
-            results,
-            wantMp4,
-            statusMsgId,
-          };
-        }
-
-        // reactionListener (إيموجي)
-        if (global.client?.reactionListener) {
-          global.client.reactionListener[statusMsgId] = {
-            author: event.senderID,
-            callback: async ({ api, event: re }) => {
-              const reaction = re.reaction;
-              const idx = EMOJI_PAIRS.findIndex(([m3, m4]) => reaction === m3 || reaction === m4);
-              if (idx < 0 || idx >= results.length) return;
-
-              const wantMp4R = reaction === EMOJI_PAIRS[idx][1];
-              const chosen   = results[idx];
-
-              delete global.client.reactionListener[statusMsgId];
-              if (global.Kagenou?.replies) delete global.Kagenou.replies[statusMsgId];
-
-              await update(`⏳ جارٍ تحميل: ${chosen.title}...`);
-              // ✅ يُرسَل الرابط المختار لـ yt.py → CF Worker → YouTube
-              await downloadAndSend(api, threadID, statusMsgId, chosen.url, wantMp4R);
-            }
-          };
-
-          setTimeout(() => {
-            if (global.client.reactionListener?.[statusMsgId])
-              delete global.client.reactionListener[statusMsgId];
-          }, 120000);
-        }
+      // أ. في حال كان المدخل رابط مباشر (يتم التحميل فوري كـ صوت)
+      if (isYtUrl(query)) {
+        await update("📥 تم رصد رابط مباشر! جاري معالجة واستخراج ملف الميديا الصوتي...");
+        const fakeChosen = { id: query, title: "مقطع من رابط مباشر", author: "YouTube" };
+        
+        return await downloadAndSend({
+          api, threadID, messageID, statusMsgId, update,
+          chosen: fakeChosen, wantMp4: false, senderID
+        });
       }
-    } catch (e) {
-      await update(`❌ ${e.message?.substring(0, 150) || "خطأ في البحث"}`);
+
+      // ب. في حال كان المدخل نص بحث عادي
+      await update(`🚀 جاري البحث عن: "${query}"...`);
+
+      // إرسال طلب البحث إلى endpoint الـ search الخاص بـ yt.py
+      const response = await axios.post(`${HF}/yt/search`, { query: query }, { timeout: 25000 });
+      const results = response.data?.results || [];
+
+      if (!results || results.length === 0) {
+        return await update("❌ لم يتم العثور على أي نتائج مطابقة لهذا البحث.");
+      }
+
+      // بناء قائمة النتائج الـ 10 المعروضة للمستخدم
+      let replyBody = `🔎 نـتـائـج الـبـحـث عـن: (${query})\n════════════════════\n`;
+      for (let i = 0; i < Math.min(results.length, 10); i++) {
+        const item = results[i];
+        replyBody += `${EMOJIS[i][0]} ${item.title}\n👤 القناة: ${item.author || "غير معروف"} | ⏱️ ${item.duration || "??:??"}\n\n`;
+      }
+      replyBody += `════════════════════\n📥 أرسل [رقم المقطع] لتحميله كـ MP3 (صوت).\n💡 أرسل [الرقم + mp4] لتحميله كـ فيديو.\n✨ مثال: 1 mp4`;
+
+      await update(replyBody);
+
+      // تسجيل بيانات الجلسة في الذاكرة بانتظار رد المستخدم (الـ Reply)
+      if (global.Kagenou?.replies) {
+        global.Kagenou.replies[statusMsgId] = {
+          commandName: "yt",
+          author: senderID,
+          results: results,
+          statusMsgId: statusMsgId
+        };
+      }
+
+      // نظام الاستماع للتفاعلات (Reaction) إن كان مدعوماً ببنيتك للتبسيط
+      if (global.client?.reactionListener) {
+        global.client.reactionListener[statusMsgId] = {
+          commandName: "yt",
+          author: senderID,
+          results: results,
+          statusMsgId: statusMsgId
+        };
+      }
+
+      // تدمير الجلسة المؤقتة بعد دقيقتين في حال عدم الاستجابة منعاً لتراكم البيانات في الذاكرة
+      setTimeout(() => {
+        if (global.Kagenou?.replies?.[statusMsgId]) delete global.Kagenou.replies[statusMsgId];
+        if (global.client?.reactionListener?.[statusMsgId]) delete global.client.reactionListener[statusMsgId];
+      }, 120000);
+
+    } catch (error) {
+      console.error(error);
+      await update(`❌ فشل الاتصال بسيرفر الباك-إند: ${error.message || "خطأ غير متوقع"}`);
     }
   },
 
   // ─────────────────────────────────────────────────────────────
+  // 2. معالجة اختيار رقم المقطع من قِبل المستخدم (onReply)
+  // ─────────────────────────────────────────────────────────────
   onReply: async ({ api, event, Reply, message }) => {
+    // التأكد من أن الذي رد هو نفس الشخص صاحب أمر البحث
     if (!Reply?.results || event.senderID !== Reply.author) return;
 
-    const { threadID }  = event;
-    const parts         = event.body?.trim().split(/\s+/) || [];
-    const idx           = parseInt(parts[0]) - 1;
-    const wantMp4       = parts[1]?.toLowerCase() === "mp4"
+    const { threadID, messageID, senderID } = event;
+    const parts = event.body?.trim().split(/\s+/) || [];
+    const idx = parseInt(parts[0]) - 1;
+    
+    // فحص هل العضو طلب تحميل الفيديو (mp4) أم الصوت (mp3)
+    const wantMp4 = parts[1]?.toLowerCase() === "mp4"
       ? true
       : parts[1]?.toLowerCase() === "mp3"
         ? false
         : Reply.wantMp4 ?? false;
 
-    if (isNaN(idx) || idx < 0 || idx >= Reply.results.length)
-      return message.reply(`❌ أرسل رقماً من 1 إلى ${Reply.results.length}\nمثال: 3 mp4`);
+    if (isNaN(idx) || idx < 0 || idx >= Reply.results.length) {
+      return message.reply(`❌ اختيار خاطئ! يرجى إرسال رقم صحيح من 1 إلى ${Reply.results.length}\nمثال للتحميل كـ فيديو: 2 mp4`);
+    }
 
-    const chosen      = Reply.results[idx];
+    const chosen = Reply.results[idx];
     const statusMsgId = Reply.statusMsgId;
 
-    if (global.client?.reactionListener?.[statusMsgId])
-      delete global.client.reactionListener[statusMsgId];
-    if (global.Kagenou?.replies?.[statusMsgId])
-      delete global.Kagenou.replies[statusMsgId];
+    // حذف مستمعات الرد فوراً لمنع التداخل والتكرار عند نقر المستخدم مرتين
+    if (global.client?.reactionListener?.[statusMsgId]) delete global.client.reactionListener[statusMsgId];
+    if (global.Kagenou?.replies?.[statusMsgId]) delete global.Kagenou.replies[statusMsgId];
 
-    const update = async (t) => {
-      try { if (statusMsgId) await api.editMessage(t, statusMsgId); } catch (_) {}
+    const update = async (text) => {
+      try { await api.editMessage(text, statusMsgId); } catch (e) {}
     };
 
-    await update(`⏳ جارٍ تحميل: ${chosen.title}...`);
-    // ✅ يُرسَل الرابط المختار لـ yt.py → CF Worker → YouTube
-    await downloadAndSend(api, threadID, statusMsgId, chosen.url, wantMp4);
-  },
+    // استدعاء الدالة التنفيذية للتحميل والإرسال
+    await downloadAndSend({
+      api, threadID, messageID, statusMsgId, update, chosen, wantMp4, senderID
+    });
+  }
 };
+
+// ─────────────────────────────────────────────────────────────
+// 3. دالة التحميل التدفقي من HF وحفظها بـ Render ثم رفعها لفيسبوك
+// ─────────────────────────────────────────────────────────────
+async function downloadAndSend({ api, threadID, messageID, statusMsgId, update, chosen, wantMp4, senderID }) {
+  // توجيه الطلب للـ endpoint الصحيح المتوقع داخل yt.py
+  const endpoint = wantMp4 ? "/yt/video" : "/yt/audio";
+  const fileExt = wantMp4 ? "mp4" : "mp3";
+  
+  // دالة yt.py تستقبل الرابط الكامل أو الـ ID كمدخل مرسل في جسم الـ POST {"url": "..."}
+  const targetUrl = chosen.id; 
+  
+  // إنشاء مسار آمن للملف المؤقت داخل مجلد الـ Temp في نظام تشغيل سيرفر Render
+  const tempFilePath = path.join(os.tmpdir(), `sunken_media_${Date.now()}_${senderID}.${fileExt}`);
+
+  try {
+    await update(`📥 جاري استخراج الميديا وتحميلها على سيرفر HF السحابي...\nالصيغة الحالية: [ ${fileExt.toUpperCase()} ] ⏳\nيرجى الانتظار، قد يستغرق الأمر دقيقة...`);
+
+    // إرسال الطلب لـ yt.py واستقبال الملف كـ مجرى تدفقي (stream) لتفادي استهلاك الرام في Render
+    const response = await axios({
+      method: "POST",
+      url: `${HF}${endpoint}`,
+      data: { url: targetUrl },
+      responseType: "stream",
+      timeout: 240000 // مهلة 4 دقائق كاملة للمقاطع الطويلة وعمليات معالجة ffmpeg الثقيلة
+    });
+
+    await update(`⚡ اكتمل الاستخراج السحابي! جاري كتابة الملف مؤقتاً لتجهيز الرفع لفيسبوك...`);
+
+    // إنشاء مجرى حفظ الملف وكتابته على قرص Render
+    const writer = fs.createWriteStream(tempFilePath);
+    response.data.pipe(writer);
+
+    await new Promise((resolve, reject) => {
+      writer.on("finish", resolve);
+      writer.on("error", reject);
+    });
+
+    // فحص أمان أولي للتأكد من أن الـ response المُستلم هو ملف ميديا وليس نص خطأ json مخفي
+    const stats = await fs.stat(tempFilePath);
+    if (stats.size < 1500) { // الأحجام الأقل من 1.5 كيلوبايت تشير غالباً إلى رسالة خطأ نصية
+      const content = await fs.readFile(tempFilePath, "utf-8");
+      if (content.includes("error") || content.startsWith("{")) {
+        const errJson = JSON.parse(content);
+        throw new Error(errJson.error || "فشل سيرفر الباك-إند في معالجة وتحويل هذا المقطع.");
+      }
+    }
+
+    await update("📤 جاري رفع الملف الصوتي/المرئي الآن إلى خوادم فيسبوك...");
+
+    // تجهيز كائن الرسالة والمرفق التنفيذي الموجه لـ fca
+    const msgToSend = {
+      body: `🎵 تم التحميل بنجاح عبر النظام السحابي!\n\n📌 العنوان: ${chosen.title}\n👤 القناة: ${chosen.author || "YouTube"}\nالصيغة العائدة: ${fileExt.toUpperCase()}`,
+      attachment: fs.createReadStream(tempFilePath)
+    };
+
+    // إرسال الملف الفعلي للمستخدم داخل شات فيسبوك ماسنجر
+    await api.sendMessage(msgToSend, threadID, async (err) => {
+      if (err) {
+        console.error("خطأ رفع المرفق إلى فيسبوك:", err);
+        await update(`❌ فشل إرسال الملف كمرفق.\n💡 السبب الشائع: حجم المقطع كبير جداً ويتجاوز الحد الأقصى المسموح به من فيسبوك للمطورين (25MB).`);
+      } else {
+        // تنظيف وحذف رسالة الانتظار التراكمية عند إتمام النجاح بنجاح
+        try { await api.unsendMessage(statusMsgId); } catch (e) {}
+      }
+      
+      // التنظيف الفوري الإلزامي لقرص Render فور إتمام الإرسال أو الفشل لحماية الحاوية من الامتلاء
+      try { await fs.unlink(tempFilePath); } catch (e) {}
+    }, messageID);
+
+  } catch (error) {
+    console.error("خطأ في دورة عمل yt.js:", error);
+    
+    // تنظيف وحذف الملف المؤقت إن وجد عند حدوث الانهيار المفاجئ
+    try { if (fs.existsSync(tempFilePath)) await fs.unlink(tempFilePath); } catch (e) {}
+    
+    let errMsg = "تعذر تحميل المقطع بسبب مهلة الاتصال أو مشكلة في استجابة السيرفر.";
+    if (error.response?.data) {
+      errMsg = `خطأ السيرفر السحابي: ${error.message}`;
+    } else {
+      errMsg = error.message || errMsg;
+    }
+    await update(`❌ فشل التحميل:\n${errMsg}`);
+  }
+}
