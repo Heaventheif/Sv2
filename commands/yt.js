@@ -4,6 +4,7 @@ const axios = require("axios");
 const fs    = require("fs-extra");
 const os    = require("os");
 const path  = require("path");
+const yts   = require("yt-search"); // مكتبة البحث المحلية
 
 const HF = (process.env.HF_SPACE_URL || "").replace(/\/+$/, "");
 
@@ -20,12 +21,12 @@ function isYtUrl(s) {
 module.exports = {
   config: {
     name: "yt",
-    version: "5.5",
+    version: "6.0",
     author: "Heaventheif",
     cooldowns: 5,
     role: 0,
-    shortDescription: "البحث والتحميل من YouTube عبر السيرفر السحابي",
-    longDescription: "يبحث في يوتيوب ويعرض قائمة نتائج، عند الرد برقم المقطع يتم تحميله كـ MP3 أو MP4 عبر سيرفر HF.",
+    shortDescription: "البحث والتحميل عبر Render + HF + CFW",
+    longDescription: "يبحث محلياً عبر Render لتسريع القائمة، ثم يحمل عبر سيرفر HF والبروكسي.",
     category: "media",
     guide: "{p}yt <اسم المقطع أو الرابط>\nمثال: {p}yt سورة البقرة"
   },
@@ -47,7 +48,7 @@ module.exports = {
       return message.reply("⚠️ يرجى كتابة نص البحث أو وضع رابط مقطع يوتيوب.");
     }
 
-    const { messageID: statusMsgId } = await message.reply("🔍 جاري فحص الطلب والاتصال بالسيرفر السحابي...");
+    const { messageID: statusMsgId } = await message.reply("🔍 جاري البحث السريع...");
 
     const update = async (text) => {
       try { await api.editMessage(text, statusMsgId); } catch (e) {}
@@ -56,27 +57,37 @@ module.exports = {
     try {
       if (isYtUrl(query)) {
         await update("📥 تم رصد رابط مباشر! جاري معالجة واستخراج ملف الميديا الصوتي...");
-        const fakeChosen = { id: query, title: "مقطع من رابط مباشر", author: "YouTube" };
+        const fakeChosen = { url: query, title: "مقطع من رابط مباشر", author: "YouTube" };
         return await downloadAndSend({
           api, threadID, messageID, statusMsgId, update,
           chosen: fakeChosen, wantMp4: false, senderID
         });
       }
 
-      await update(`🚀 جاري البحث عن: "${query}"...`);
+      // البحث المباشر والمحلي باستخدام مكتبة yt-search على سيرفر Render
+      const searchResults = await yts(query);
+      const videos = searchResults.videos.slice(0, 10);
 
-      const response = await axios.post(`${HF}/yt/search`, { query: query }, { timeout: 25000 });
-      const results = response.data?.results || [];
-
-      if (!results || results.length === 0) {
+      if (!videos || videos.length === 0) {
         return await update("❌ لم يتم العثور على أي نتائج مطابقة لهذا البحث.");
       }
 
       let replyBody = `🔎 نـتـائـج الـبـحـث عـن: (${query})\n════════════════════\n`;
-      for (let i = 0; i < Math.min(results.length, 10); i++) {
-        const item = results[i];
-        replyBody += `${EMOJIS[i][0]} ${item.title}\n👤 القناة: ${item.author || "غير معروف"} | ⏱️ ${item.duration || "??:??"}\n\n`;
+      const cleanedResults = [];
+
+      for (let i = 0; i < videos.length; i++) {
+        const v = videos[i];
+        
+        cleanedResults.push({
+          url: v.url, // نمرر الرابط الكامل مباشرة للباك-إند
+          title: v.title,
+          author: v.author.name,
+          duration: v.timestamp
+        });
+
+        replyBody += `${EMOJIS[i][0]} ${v.title}\n👤 القناة: ${v.author.name} | ⏱️ ${v.timestamp}\n\n`;
       }
+
       replyBody += `════════════════════\n📥 أرسل [رقم المقطع] لتحميله كـ MP3.\n💡 أرسل [الرقم + mp4] لتحميله كـ فيديو.\n✨ مثال: 1 mp4`;
 
       await update(replyBody);
@@ -85,7 +96,7 @@ module.exports = {
         global.Kagenou.replies[statusMsgId] = {
           commandName: "yt",
           author: senderID,
-          results: results,
+          results: cleanedResults,
           statusMsgId: statusMsgId
         };
       }
@@ -96,7 +107,7 @@ module.exports = {
 
     } catch (error) {
       console.error(error);
-      await update(`❌ فشل الاتصال بسيرفر الباك-إند: ${error.message || "خطأ غير متوقع"}`);
+      await update(`❌ فشل البحث: ${error.message || "خطأ غير متوقع"}`);
     }
   },
 
@@ -136,25 +147,21 @@ async function downloadAndSend({ api, threadID, messageID, statusMsgId, update, 
   const endpoint = wantMp4 ? "/yt/video" : "/yt/audio";
   const fileExt = wantMp4 ? "mp4" : "mp3";
   
-  let targetUrl = chosen.id; 
-  if (targetUrl && !targetUrl.startsWith("http")) {
-    targetUrl = `https://www.youtube.com/watch?v=${targetUrl}`;
-  }
-  
   const tempFilePath = path.join(os.tmpdir(), `sunken_media_${Date.now()}_${senderID}.${fileExt}`);
 
   try {
     await update(`📥 جاري استخراج الميديا وتحميلها سحابياً...\nالصيغة الحالية: [ ${fileExt.toUpperCase()} ] ⏳`);
 
+    // إرسال الرابط الكامل لـ HF ليبدأ yt-dlp المعالجة
     const response = await axios({
       method: "POST",
       url: `${HF}${endpoint}`,
-      data: { url: targetUrl },
+      data: { url: chosen.url },
       responseType: "stream",
       timeout: 240000
     });
 
-    await update(`⚡ اكتمل الاستخراج السحابي! جاري كتابة الملف مؤقتاً لتجهيز الرفع...`);
+    await update(`⚡ تم الوصول للسيرفرات! جاري تنزيل الملف لتجهيز الرفع...`);
 
     const writer = fs.createWriteStream(tempFilePath);
     response.data.pipe(writer);
@@ -176,13 +183,13 @@ async function downloadAndSend({ api, threadID, messageID, statusMsgId, update, 
     await update("📤 جاري رفع الملف الآن إلى خوادم فيسبوك...");
 
     const msgToSend = {
-      body: `🎵 تم التحميل بنجاح!\n\n📌 العنوان: ${chosen.title}\n👤 القناة: ${chosen.author || "YouTube"}`,
+      body: `🎵 تم التحميل بنجاح!\n\n📌 العنوان: ${chosen.title}\n👤 القناة: ${chosen.author}`,
       attachment: fs.createReadStream(tempFilePath)
     };
 
     await api.sendMessage(msgToSend, threadID, async (err) => {
       if (err) {
-        await update(`❌ فشل إرسال الملف كمرفق (قد يتجاوز 25MB حد فيسبوك).`);
+        await update(`❌ فشل إرسال الملف كمرفق (تأكد أن حجم المقطع لا يتجاوز 25MB).`);
       } else {
         try { await api.unsendMessage(statusMsgId); } catch (e) {}
       }
