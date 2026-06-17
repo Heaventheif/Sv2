@@ -206,7 +206,7 @@ async function cleanTemp(p) {
 // ══════════════════════════════════════════════════════════════
 module.exports = {
   config: {
-    name:      "s",
+    name:      "sc",
     aliases:   ["sc", "بريفيو", "مقطع"],
     version:   "4.0",
     role:      0,
