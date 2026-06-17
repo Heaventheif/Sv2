@@ -41,11 +41,11 @@ global.appState         = {};
 global.threadConfigs    = new Map();
 global.botApi           = null;
 
-const fs      = require("fs-extra");
-const path    = require("path");
-const login   = require("@dongdev/fca-unofficial");
-const chalk   = require("chalk");
-const express = require("express");
+const fs       = require("fs-extra");
+const path     = require("path");
+const login    = require("@dongdev/fca-unofficial");
+const chalk    = require("chalk");
+const express  = require("express");
 
 try { require("dotenv").config(); } catch (_) {}
 
@@ -655,7 +655,11 @@ const startBot = async () => {
   // ① أول شيء: افتح المنفذ — Render يرفض العملية إذا لم يجد port خلال دقائق
   startWebServer();
 
+  // ✅ اتصال MongoDB — connectDB() تضبط global.db بنفسها
+  // (تُعيدها mongoose عند النجاح، أو null عند الفشل/عدم وجود MONGO_URI)
+  // ملفات الجلسات (cerebras.js, gemini.js, groq.js, hf.js) تتحقق من global.db قبل الحفظ/القراءة
   await connectDB();
+
   loadCommands();
 
   // ════════════════════════════════════════════════════════
