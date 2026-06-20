@@ -133,7 +133,7 @@ module.exports = {
 
     try {
       const audioBuffer = await callGeminiTTS(text, voice);
-      const filePath    = path.join(os.tmpdir(), `tts_${Date.now()}.mp3`);
+      const filePath    = path.join(os.tmpdir(), `tts_${Date.now()}.m4a`);
       await fs.writeFile(filePath, audioBuffer);
 
       await new Promise((resolve, reject) =>
