@@ -5,7 +5,6 @@ const fs    = require("fs-extra");
 const os    = require("os");
 const path  = require("path");
 
-// ─── Gemini TTS مباشرة من Node ─────────────────────────────────
 const GEMINI_KEYS = [
   process.env.GEMINI_API_KEY,
   process.env.GEMINI_API_KEY_2,
@@ -15,15 +14,17 @@ const GEMINI_KEYS = [
 
 const TTS_MODEL = "gemini-2.5-flash-preview-tts";
 
+// ✅ القائمة الصحيحة من رسالة الخطأ
 const ALL_VOICES = [
-  "Aoede", "Autonoe", "Puck", "Fenrir", "Algieba", "Despina", "Gacrux",
-  "Zephyr", "Callirrhoe", "Charon", "Rasalgethi", "Iapetus", "Erinome",
-  "Schedar", "Sulafat", "Vindemiatrix", "Achird", "Leda", "Sadaltager",
-  "Adhil", "Alkaid", "Ankaa", "Arneb", "Baten", "Capella", "Castor",
-  "Deneb", "Kraz", "Mizar", "Pollux",
+  "Achernar", "Achird", "Algenib", "Algieba", "Alnilam",
+  "Aoede", "Autonoe", "Callirrhoe", "Charon", "Despina",
+  "Enceladus", "Erinome", "Fenrir", "Gacrux", "Iapetus",
+  "Kore", "Laomedeia", "Leda", "Orus", "Puck",
+  "Pulcherrima", "Rasalgethi", "Sadachbia", "Sadaltager",
+  "Schedar", "Sulafat", "Umbriel", "Vindemiatrix",
+  "Zephyr", "Zubenelgenubi",
 ];
 
-// ── تدوير عشوائي بدون تكرار ─────────────────────────────────────
 let _voicePool = [];
 function nextVoice() {
   if (!_voicePool.length) {
@@ -32,9 +33,6 @@ function nextVoice() {
   return _voicePool.pop();
 }
 
-// ═══════════════════════════════════════════════════════════════
-// استدعاء Gemini TTS API مباشرة
-// ═══════════════════════════════════════════════════════════════
 async function callGeminiTTS(text, voice) {
   if (!GEMINI_KEYS.length) throw new Error("لا توجد مفاتيح GEMINI_API_KEY في البيئة");
 
@@ -59,12 +57,10 @@ async function callGeminiTTS(text, voice) {
 
       const audioData = res.data?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
       if (audioData) return Buffer.from(audioData, "base64");
-
       errors.push(`key[${key.slice(0,8)}]: استجابة فارغة`);
     } catch (e) {
       const msg = e.response?.data?.error?.message || e.message;
       errors.push(`key[${key.slice(0,8)}]: ${msg}`);
-      // تجاوز خطأ الحصة فقط
       const status = e.response?.status;
       if (status !== 429 && status !== 503) throw new Error(msg);
     }
@@ -72,12 +68,11 @@ async function callGeminiTTS(text, voice) {
   throw new Error("كل المفاتيح فشلت:\n" + errors.join("\n"));
 }
 
-// ═══════════════════════════════════════════════════════════════
 module.exports = {
   config: {
     name:      "tts",
     aliases:   ["speak", "voice", "صوت"],
-    version:   "2.0",
+    version:   "2.1",
     role:      0,
     countDown: 10,
     category:  "media",
@@ -98,7 +93,6 @@ module.exports = {
       "• tts voices            — قائمة الأصوات الـ 30"
     );
 
-    // ── عرض الأصوات ──────────────────────────────────────────
     if (args[0].toLowerCase() === "voices") {
       return message.reply(
         `🎙️ الأصوات المتاحة (${ALL_VOICES.length}):\n\n` +
@@ -107,23 +101,19 @@ module.exports = {
       );
     }
 
-    // ── تحديد الصوت والنص ────────────────────────────────────
     let voice, text;
     if (args[0].toLowerCase() === "voice") {
-      voice = args[1] || nextVoice();
+      const candidate = args[1] || "";
+      voice = ALL_VOICES.find(v => v.toLowerCase() === candidate.toLowerCase()) || nextVoice();
       text  = args.slice(2).join(" ").trim();
-      if (!ALL_VOICES.includes(voice)) {
-        voice = nextVoice();
-      }
     } else {
       voice = nextVoice();
       text  = args.join(" ").trim();
     }
 
-    if (!text)           return message.reply("❌ أرسل النص المراد تحويله.");
+    if (!text)              return message.reply("❌ أرسل النص المراد تحويله.");
     if (text.length > 3000) return message.reply("❌ النص طويل جداً (3000 حرف كحد أقصى).");
 
-    // ── رسالة انتظار ─────────────────────────────────────────
     let statusMsgId = null;
     try {
       const sent = await new Promise((resolve, reject) =>
@@ -141,19 +131,14 @@ module.exports = {
       try { if (statusMsgId) await api.editMessage(t, statusMsgId); } catch (_) {}
     };
 
-    // ── استدعاء TTS ──────────────────────────────────────────
     try {
       const audioBuffer = await callGeminiTTS(text, voice);
-
-      const filePath = path.join(os.tmpdir(), `tts_${Date.now()}.mp3`);
+      const filePath    = path.join(os.tmpdir(), `tts_${Date.now()}.mp3`);
       await fs.writeFile(filePath, audioBuffer);
 
       await new Promise((resolve, reject) =>
         api.sendMessage(
-          {
-            body:       `🎙️ الصوت: ${voice}`,
-            attachment: fs.createReadStream(filePath),
-          },
+          { body: `🎙️ الصوت: ${voice}`, attachment: fs.createReadStream(filePath) },
           threadID,
           err => err ? reject(err) : resolve()
         )
