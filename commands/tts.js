@@ -1,169 +1,116 @@
 "use strict";
-/**
- * sc_tts.js — أمر TTS (تحويل النص إلى صوت)
- * ════════════════════════════════════════════════════
- * يرسل النص لـ HF Space (plugin /tts) ويستقبل ملف mp3
- * ويرسله للمستخدم مباشرة.
- *
- * الاعتماديات: axios, fs-extra (موجودتان في package.json)
- * متغيرات البيئة المطلوبة في Render:
- *   HF_SPACE_URL=https://your-username-your-space.hf.space
- * ════════════════════════════════════════════════════
- */
 
 const axios = require("axios");
 const fs    = require("fs-extra");
 const os    = require("os");
 const path  = require("path");
 
-// ─── رابط HF Space ───────────────────────────────────────────
-const HF_URL = (process.env.HF_SPACE_URL || "").replace(/\/$/, "");
+const HF_BASE = "https://solvant-s.hf.space";
 
-// ─── حد أقصى للنص ────────────────────────────────────────────
-const MAX_TEXT = 3000;
-
-// ─── تنظيف /tmp ──────────────────────────────────────────────
-async function cleanTemp(p) {
-  try { if (p && await fs.pathExists(p)) await fs.remove(p); } catch (_) {}
-}
-
-// ─── استدعاء HF Space /tts ───────────────────────────────────
-async function fetchTTS(text, voice = null) {
-  if (!HF_URL) throw new Error("HF_SPACE_URL غير موجود في متغيرات البيئة");
-
-  const body = { text, base64: false };
-  if (voice) body.voice = voice;
-
-  const response = await axios.post(`${HF_URL}/tts`, body, {
-    responseType: "arraybuffer",
-    timeout:      60000,
-    headers: { "Content-Type": "application/json" },
-  });
-
-  // استخرج اسم الصوت من headers إن وُجد
-  const voiceUsed = response.headers["x-voice-used"] || voice || "unknown";
-
-  const buffer = Buffer.from(response.data);
-  if (!buffer.length) throw new Error("ملف الصوت فارغ");
-
-  return { buffer, voiceUsed };
-}
-
-// ════════════════════════════════════════════════════════════
 module.exports = {
   config: {
     name:      "tts",
-    aliases:   ["صوت", "نطق", "speak"],
+    aliases:   ["speak", "voice", "صوت"],
     version:   "1.0",
     role:      0,
     countDown: 10,
     category:  "media",
-    guide: {
-      en:
-        "{pn} <النص>             — يحوّل النص إلى صوت\n" +
-        "{pn} -v Aoede <النص>    — يختار صوتاً محدداً\n" +
-        "{pn} voices             — يعرض قائمة الأصوات",
-    },
+    guide: { en:
+      "{pn} <نص>              — تحويل النص لصوت\n" +
+      "{pn} voice <اسم> <نص> — اختيار صوت معين\n" +
+      "{pn} voices            — عرض الأصوات المتاحة"
+    }
   },
 
   onStart: async ({ api, message, args, event }) => {
     const { threadID, messageID } = event;
 
-    // ─── بدون args ────────────────────────────────────────
-    if (!args[0]) {
-      return message.reply(
-        "🔊 تحويل النص إلى صوت (Gemini TTS)\n\n" +
-        "الاستخدام:\n" +
-        ".tts <النص>\n" +
-        ".tts -v Aoede <النص>   (صوت محدد)\n" +
-        ".tts voices             (قائمة الأصوات)\n\n" +
-        "مثال:\n" +
-        ".tts مرحباً، كيف حالك؟"
-      );
-    }
+    if (!args[0]) return message.reply(
+      "🎙️ تحويل النص إلى صوت\n\n" +
+      "• tts <نص>              — تحويل عشوائي\n" +
+      "• tts voice <اسم> <نص> — صوت محدد\n" +
+      "• tts voices            — قائمة الأصوات"
+    );
 
-    // ─── عرض قائمة الأصوات ────────────────────────────────
+    // ── عرض الأصوات ─────────────────────────────────────────
     if (args[0].toLowerCase() === "voices") {
-      if (!HF_URL) return message.reply("❌ HF_SPACE_URL غير موجود في الإعدادات");
       try {
-        const r = await axios.get(`${HF_URL}/tts/voices`, { timeout: 10000 });
-        const voices = r.data.voices || [];
-        return message.reply(
-          `🎙️ الأصوات المدعومة (${voices.length}):\n\n` +
-          voices.join(" • ")
-        );
+        const res = await axios.get(`${HF_BASE}/tts/voices`, { timeout: 10000 });
+        const { voices, total, model } = res.data;
+        const list = voices.join("، ");
+        return message.reply(`🎙️ الأصوات المتاحة (${total}):\n\n${list}\n\n📌 النموذج: ${model}`);
       } catch (e) {
-        return message.reply(`❌ فشل جلب قائمة الأصوات: ${e.message?.substring(0, 100)}`);
+        return message.reply("❌ فشل جلب قائمة الأصوات.");
       }
     }
 
-    // ─── استخراج الصوت المحدد -v <name> ──────────────────
+    // ── تحديد الصوت والنص ───────────────────────────────────
     let voice = null;
-    let textArgs = [...args];
-    if (args[0] === "-v" && args[1]) {
-      voice    = args[1];
-      textArgs = args.slice(2);
+    let text  = null;
+
+    if (args[0].toLowerCase() === "voice") {
+      voice = args[1] || null;
+      text  = args.slice(2).join(" ").trim();
+    } else {
+      text = args.join(" ").trim();
     }
 
-    const text = textArgs.join(" ").trim();
-    if (!text) return message.reply("❌ النص فارغ");
+    if (!text) return message.reply("❌ أرسل النص المراد تحويله.");
 
-    if (text.length > MAX_TEXT) {
-      return message.reply(
-        `❌ النص طويل جداً (${text.length} حرف)\n` +
-        `الحد الأقصى: ${MAX_TEXT} حرف`
-      );
-    }
-
-    // ─── رسالة الحالة ─────────────────────────────────────
+    // ── رسالة انتظار ────────────────────────────────────────
     let statusMsgId = null;
     try {
-      const sent = await new Promise((res, rej) =>
+      const sent = await new Promise((resolve, reject) =>
         api.sendMessage(
-          `🔊 جارٍ تحويل النص إلى صوت...`,
+          "🎙️ جارٍ تحويل النص إلى صوت...",
           threadID,
-          (err, info) => err ? rej(err) : res(info),
+          (err, info) => err ? reject(err) : resolve(info),
           messageID
         )
       );
       statusMsgId = sent?.messageID;
     } catch (_) {}
 
-    const update = async (t) => {
-      try { if (statusMsgId) await api.editMessage(t, statusMsgId); } catch (_) {}
+    const updateStatus = async (txt) => {
+      try { if (statusMsgId) await api.editMessage(txt, statusMsgId); } catch (_) {}
     };
 
-    let filePath = null;
+    // ── استدعاء tts.py ──────────────────────────────────────
     try {
-      const { buffer, voiceUsed } = await fetchTTS(text, voice);
+      const body = { text, base64: true };
+      if (voice) body.voice = voice;
 
-      // حفظ في /tmp
-      filePath = path.join(os.tmpdir(), `tts_${Date.now()}.mp3`);
-      await fs.writeFile(filePath, buffer);
+      const res = await axios.post(`${HF_BASE}/tts`, body, { timeout: 60000 });
+      const { audio_base64, voice: usedVoice, content_type } = res.data;
 
-      const stat = await fs.stat(filePath);
-      if (stat.size === 0) throw new Error("ملف الصوت فارغ");
+      if (!audio_base64) throw new Error("لم يُرسَل صوت من السيرفر");
 
-      const preview = text.length > 60 ? text.substring(0, 60) + "..." : text;
+      // ── حفظ الملف مؤقتاً ──────────────────────────────────
+      const ext      = content_type?.includes("mp3") ? "mp3" : "wav";
+      const filePath = path.join(os.tmpdir(), `tts_${Date.now()}.${ext}`);
+      await fs.writeFile(filePath, Buffer.from(audio_base64, "base64"));
 
-      await new Promise((res, rej) =>
+      // ── إرسال الصوت ───────────────────────────────────────
+      await new Promise((resolve, reject) =>
         api.sendMessage(
           {
-            body:       `🎙️ ${voiceUsed}\n📝 ${preview}`,
-            attachment: fs.createReadStream(filePath),
+            body:       `🎙️ الصوت: ${usedVoice}`,
+            attachment: fs.createReadStream(filePath)
           },
           threadID,
-          err => err ? rej(err) : res()
+          (err) => err ? reject(err) : resolve()
         )
       );
 
-      try { if (statusMsgId) api.unsendMessage(statusMsgId, () => {}); } catch (_) {}
+      // حذف رسالة الانتظار
+      try { if (statusMsgId) await api.unsendMessage(statusMsgId, threadID); } catch (_) {}
 
-    } catch (err) {
-      console.error("[tts] خطأ:", err.message);
-      await update(`❌ ${err.message?.substring(0, 200) || "خطأ غير معروف"}`);
-    } finally {
-      await cleanTemp(filePath);
+      // تنظيف
+      try { await fs.remove(filePath); } catch (_) {}
+
+    } catch (e) {
+      const msg = e.response?.data?.error || e.message;
+      await updateStatus(`❌ ${msg}`);
     }
-  },
+  }
 };
