@@ -1,5 +1,3 @@
-"use strict";
-
 const axios = require("axios");
 const fs    = require("fs-extra");
 const os    = require("os");
@@ -14,7 +12,6 @@ const GEMINI_KEYS = [
 
 const TTS_MODEL = "gemini-2.5-flash-preview-tts";
 
-// ✅ القائمة الصحيحة من رسالة الخطأ
 const ALL_VOICES = [
   "Achernar", "Achird", "Algenib", "Algieba", "Alnilam",
   "Aoede", "Autonoe", "Callirrhoe", "Charon", "Despina",
@@ -27,10 +24,38 @@ const ALL_VOICES = [
 
 let _voicePool = [];
 function nextVoice() {
-  if (!_voicePool.length) {
+  if (!_voicePool.length)
     _voicePool = [...ALL_VOICES].sort(() => Math.random() - 0.5);
-  }
   return _voicePool.pop();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Gemini يرجع PCM خام (24kHz, mono, 16-bit) — نحوّله لـ WAV
+// ═══════════════════════════════════════════════════════════════
+function pcmToWav(pcmBuffer, sampleRate = 24000, channels = 1, bitDepth = 16) {
+  const byteRate    = sampleRate * channels * (bitDepth / 8);
+  const blockAlign  = channels * (bitDepth / 8);
+  const dataSize    = pcmBuffer.length;
+  const headerSize  = 44;
+  const wav         = Buffer.alloc(headerSize + dataSize);
+
+  // RIFF header
+  wav.write("RIFF",           0);
+  wav.writeUInt32LE(36 + dataSize, 4);
+  wav.write("WAVE",           8);
+  wav.write("fmt ",          12);
+  wav.writeUInt32LE(16,      16);   // PCM chunk size
+  wav.writeUInt16LE(1,       20);   // PCM format
+  wav.writeUInt16LE(channels,22);
+  wav.writeUInt32LE(sampleRate, 24);
+  wav.writeUInt32LE(byteRate,   28);
+  wav.writeUInt16LE(blockAlign, 32);
+  wav.writeUInt16LE(bitDepth,   34);
+  wav.write("data",          36);
+  wav.writeUInt32LE(dataSize, 40);
+  pcmBuffer.copy(wav, headerSize);
+
+  return wav;
 }
 
 async function callGeminiTTS(text, voice) {
@@ -55,9 +80,20 @@ async function callGeminiTTS(text, voice) {
         { timeout: 60000 }
       );
 
-      const audioData = res.data?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (audioData) return Buffer.from(audioData, "base64");
-      errors.push(`key[${key.slice(0,8)}]: استجابة فارغة`);
+      const part = res.data?.candidates?.[0]?.content?.parts?.[0];
+      const audioData  = part?.inlineData?.data;
+      const mimeType   = part?.inlineData?.mimeType || "";
+
+      if (!audioData) { errors.push(`key[${key.slice(0,8)}]: استجابة فارغة`); continue; }
+
+      const rawBuffer = Buffer.from(audioData, "base64");
+
+      // إذا PCM خام — حوّله لـ WAV
+      if (mimeType.includes("pcm") || mimeType.includes("L16") || !mimeType.includes("wav")) {
+        return { buffer: pcmToWav(rawBuffer), ext: "wav" };
+      }
+      return { buffer: rawBuffer, ext: "wav" };
+
     } catch (e) {
       const msg = e.response?.data?.error?.message || e.message;
       errors.push(`key[${key.slice(0,8)}]: ${msg}`);
@@ -72,7 +108,7 @@ module.exports = {
   config: {
     name:      "tts",
     aliases:   ["speak", "voice", "صوت"],
-    version:   "2.1",
+    version:   "2.2",
     role:      0,
     countDown: 10,
     category:  "media",
@@ -132,9 +168,9 @@ module.exports = {
     };
 
     try {
-      const audioBuffer = await callGeminiTTS(text, voice);
-      const filePath    = path.join(os.tmpdir(), `tts_${Date.now()}.m4a`);
-      await fs.writeFile(filePath, audioBuffer);
+      const { buffer, ext } = await callGeminiTTS(text, voice);
+      const filePath = path.join(os.tmpdir(), `tts_${Date.now()}.${ext}`);
+      await fs.writeFile(filePath, buffer);
 
       await new Promise((resolve, reject) =>
         api.sendMessage(
