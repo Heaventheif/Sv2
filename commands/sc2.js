@@ -1,11 +1,15 @@
 "use strict";
 
-const play = require("play-dl");
+const play  = require("play-dl");
 const axios = require("axios");
-const fs   = require("fs-extra");
-const os   = require("os");
-const path = require("path");
+const fs    = require("fs-extra");
+const os    = require("os");
+const path  = require("path");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+const execFileAsync = promisify(execFile);
 
+// ─── تهيئة play-dl ─────────────────────────────────────────────
 let _initialized = false;
 async function ensureInit() {
   if (_initialized) return;
@@ -18,6 +22,7 @@ async function ensureInit() {
   _initialized = true;
 }
 
+// ─── ستيكرز الرقص ──────────────────────────────────────────────
 const STICKERS_DIR  = path.join(__dirname, "..", "assets", "dance_stickers");
 const SUPPORTED_EXT = new Set([".gif", ".png", ".webp"]);
 let _stickerCache   = null;
@@ -45,10 +50,24 @@ async function sendDanceSticker(api, threadID) {
   } catch (_) {}
 }
 
+// ─── تحويل أي صوت → mp3 حقيقي عبر ffmpeg ──────────────────────
+async function toMp3(inputPath, outputPath) {
+  await execFileAsync("ffmpeg", [
+    "-y",
+    "-i", inputPath,
+    "-vn",
+    "-ar", "44100",
+    "-ac", "2",
+    "-b:a", "128k",
+    "-f", "mp3",
+    outputPath
+  ], { timeout: 60000 });
+}
+
+// ─── البحث والتحميل ────────────────────────────────────────────
 async function searchAndDownload(query) {
   await ensureInit();
 
-  // 1. بحث
   const results = await play.search(query, {
     source: { soundcloud: "tracks" },
     limit: 1,
@@ -57,69 +76,45 @@ async function searchAndDownload(query) {
 
   const track = results[0];
 
-  // 2. جيب الـ stream object للحصول على معلومات فقط
+  const rawPath = path.join(os.tmpdir(), `sc2_raw_${Date.now()}`);
+  const mp3Path = path.join(os.tmpdir(), `sc2_${Date.now()}.mp3`);
+
+  // جلب stream من play-dl
   const streamData = await play.stream(track.url, { quality: 0 });
 
-  // 3. استخرج الـ URL المباشر من الـ stream
-  //    play-dl يضع الـ URL في streamData.url أو في stream._readableState.url
-  let directUrl = streamData.url
-    || streamData.stream?.url
-    || streamData.stream?._readableState?.url;
+  // احفظ الـ raw stream (أيًا كان صيغته)
+  await new Promise((res, rej) => {
+    const timeout = setTimeout(() => {
+      try { streamData.stream.destroy(); } catch (_) {}
+      rej(new Error("انتهت مهلة التحميل"));
+    }, 60000);
 
-  if (!directUrl) {
-    // طريقة بديلة: نستخدم الـ stream مباشرة عبر pipe مع timeout
-    const filePath = path.join(os.tmpdir(), `sc2_${Date.now()}.mp3`);
-    await new Promise((res, rej) => {
-      const timeout = setTimeout(() => {
-        try { streamData.stream.destroy(); } catch(_){}
-        rej(new Error("انتهت مهلة التحميل"));
-      }, 30000);
-
-      const out = fs.createWriteStream(filePath);
-      streamData.stream.pipe(out);
-      out.on("finish", () => { clearTimeout(timeout); res(); });
-      out.on("error",  (e) => { clearTimeout(timeout); rej(e); });
-      streamData.stream.on("error", (e) => { clearTimeout(timeout); rej(e); });
-    });
-
-    const stat = await fs.stat(filePath);
-    if (stat.size < 1000) throw new Error("الملف فارغ أو ناقص");
-
-    return {
-      filePath,
-      title:      track.name || "بدون عنوان",
-      artist:     track.publisher_metadata?.artist || track.user?.username || "",
-      durationMs: (track.durationInSec || 0) * 1000,
-    };
-  }
-
-  // 4. حمّل بـ axios (أكثر موثوقية من pipe)
-  const filePath = path.join(os.tmpdir(), `sc2_${Date.now()}.mp3`);
-
-  const dlRes = await axios.get(directUrl, {
-    responseType:     "arraybuffer",
-    timeout:          60000,
-    maxContentLength: 15 * 1024 * 1024,
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    },
+    const out = fs.createWriteStream(rawPath);
+    streamData.stream.pipe(out);
+    out.on("finish", () => { clearTimeout(timeout); res(); });
+    out.on("error",  e  => { clearTimeout(timeout); rej(e); });
+    streamData.stream.on("error", e => { clearTimeout(timeout); rej(e); });
   });
 
-  const buffer = Buffer.from(dlRes.data);
-  if (!buffer.length) throw new Error("ملف الصوت فارغ");
-  await fs.writeFile(filePath, buffer);
+  const rawStat = await fs.stat(rawPath);
+  if (rawStat.size < 1000) throw new Error("الملف الخام فارغ أو ناقص");
 
-  const stat = await fs.stat(filePath);
-  if (stat.size < 1000) throw new Error("ملف الصوت ناقص");
+  // حوّل إلى mp3 صحيح
+  await toMp3(rawPath, mp3Path);
+  await fs.remove(rawPath).catch(() => {});
+
+  const mp3Stat = await fs.stat(mp3Path);
+  if (mp3Stat.size < 1000) throw new Error("فشل تحويل الصوت إلى mp3");
 
   return {
-    filePath,
+    filePath:   mp3Path,
     title:      track.name || "بدون عنوان",
     artist:     track.publisher_metadata?.artist || track.user?.username || "",
     durationMs: (track.durationInSec || 0) * 1000,
   };
 }
 
+// ─── مساعدات ───────────────────────────────────────────────────
 function fmtDuration(ms) {
   if (!ms) return "";
   const s = Math.round(ms / 1000), m = Math.floor(s / 60);
@@ -130,11 +125,12 @@ async function cleanTemp(p) {
   try { if (p && await fs.pathExists(p)) await fs.remove(p); } catch (_) {}
 }
 
+// ═══════════════════════════════════════════════════════════════
 module.exports = {
   config: {
     name:        "sc2",
     aliases:     ["بريفيو2"],
-    version:     "3.3",
+    version:     "4.0",
     role:        0,
     countDown:   10,
     category:    "media",
@@ -174,7 +170,7 @@ module.exports = {
 
     let filePath = null;
     try {
-      await update("🎵 جارٍ تحميل المقطع...");
+      await update("🎵 جارٍ تحميل المقطع وتحويله...");
 
       const result = await searchAndDownload(query);
       filePath = result.filePath;
