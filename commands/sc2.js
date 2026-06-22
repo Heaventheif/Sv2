@@ -1,12 +1,13 @@
 "use strict";
 
-const play  = require("play-dl");
-const axios = require("axios");
-const fs    = require("fs-extra");
-const os    = require("os");
-const path  = require("path");
+const play        = require("play-dl");
+const axios       = require("axios");
+const fs          = require("fs-extra");
+const os          = require("os");
+const path        = require("path");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
+const ffmpegPath   = require("ffmpeg-static");
 const execFileAsync = promisify(execFile);
 
 // ─── تهيئة play-dl ─────────────────────────────────────────────
@@ -50,9 +51,9 @@ async function sendDanceSticker(api, threadID) {
   } catch (_) {}
 }
 
-// ─── تحويل أي صوت → mp3 حقيقي عبر ffmpeg ──────────────────────
+// ─── تحويل الصوت الخام → mp3 عبر ffmpeg-static ─────────────────
 async function toMp3(inputPath, outputPath) {
-  await execFileAsync("ffmpeg", [
+  await execFileAsync(ffmpegPath, [
     "-y",
     "-i", inputPath,
     "-vn",
@@ -79,10 +80,10 @@ async function searchAndDownload(query) {
   const rawPath = path.join(os.tmpdir(), `sc2_raw_${Date.now()}`);
   const mp3Path = path.join(os.tmpdir(), `sc2_${Date.now()}.mp3`);
 
-  // جلب stream من play-dl
+  // جلب stream من play-dl (HLS أو Opus أو أي صيغة)
   const streamData = await play.stream(track.url, { quality: 0 });
 
-  // احفظ الـ raw stream (أيًا كان صيغته)
+  // حفظ الـ raw stream كما هو
   await new Promise((res, rej) => {
     const timeout = setTimeout(() => {
       try { streamData.stream.destroy(); } catch (_) {}
@@ -99,7 +100,7 @@ async function searchAndDownload(query) {
   const rawStat = await fs.stat(rawPath);
   if (rawStat.size < 1000) throw new Error("الملف الخام فارغ أو ناقص");
 
-  // حوّل إلى mp3 صحيح
+  // تحويل إلى mp3 حقيقي
   await toMp3(rawPath, mp3Path);
   await fs.remove(rawPath).catch(() => {});
 
