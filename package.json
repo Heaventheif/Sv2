@@ -1,12 +1,12 @@
 {
   "name": "SunkenBot",
   "version": "2.0.0",
-  "description": "SunkenBot - Messenger Bot (Mongoose Edition) - Bun Runtime",
+  "description": "SunkenBot - Messenger Bot (Mongoose Edition)",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "start": "bun --smol index.js",
-    "dev": "bun --hot index.js"
+    "start": "node index.js",
+    "dev": "node --watch index.js"
   },
   "dependencies": {
     "@dongdev/fca-unofficial": "latest",
@@ -26,7 +26,6 @@
     "@vreden/youtube_scraper": "latest"
   },
   "engines": {
-    "node": "22.x",
-    "bun": ">=1.3.0"
+    "node": "22.x"
   }
 }
