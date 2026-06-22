@@ -1,170 +1,170 @@
 const fs = require("fs");
 const path = require("path");
 
-// 🗺️ خريطة دمج التصنيفات (تصنيفات متعددة ➜ عنوان واحد موحد)
+// ═══════════════════════════════════════════════════════════════
+// خريطة التصنيفات الموحدة
+// ═══════════════════════════════════════════════════════════════
 const CATEGORY_MERGE = {
-  "أوامر الإدارة والمشرفين": [
-    "admin", "إشراف", "إدارة النظام", "Moderation 🛡️",
-    "clearcache", "reload", "kick", "filteruser", "adduser", "antiout", "prefix"
+  "الذكاء الاصطناعي": [
+    "ذكاء اصطناعي", "ai", "gemini", "gptx", "groq", "gpt", "hf", "cerebras"
   ],
-  "أوامر الذكاء الاصطناعي": [
-    "ذكاء اصطناعي", "ai", "gemini", "gptx", "groq"
+  "الوسائط والتحميل": [
+    "media", "وسائط", "download", "تحميل",
+    "yt", "ydl", "yt2", "sc", "sc2", "sing", "fb",
+    "img", "tts", "pinterest", "random"
   ],
-  "أوامر الوسائط والتحميل": [
-    "media", "وسائط", "تحميل", "ytdl", "sing", "autodl", "img", "ttk", "bratvid"
+  "الألعاب والترفيه": [
+    "games", "fun", "chess", "catfact", "dogfact", "novel"
   ],
-  "الأدوات المساعدة والمعلومات": [
-    "أدوات", "tools", "help", "gid", "uid", "tr", "notes"
+  "الإدارة والإشراف": [
+    "admin", "إشراف", "إدارة",
+    "kick", "adduser", "up"
+  ],
+  "الأدوات العامة": [
+    "أدوات", "tools",
+    "help", "tr", "gid", "uid", "decor", "quran",
+    "profile", "unsend"
   ]
 };
 
-// 🏷️ أسماء بديلة تظهر بجانب الأمر في القائمة
-const ALIAS_HINTS = {
-  help: "مساعدة",
-  kick: "طرد",
-  adduser: "اضافة",
-  sing: "mp3",
-  img: "صورة",
-  tr: "ترجمة",
-  uid: "ايدي",
-  gid: "معرف_المجموعة",
-  gemini: "بوت",
-  groq: "ai2"
+// ═══════════════════════════════════════════════════════════════
+// وصف مدمج للأوامر التي لا تحمل description في config
+// ═══════════════════════════════════════════════════════════════
+const FALLBACK_DESC = {
+  fb:     "تحميل الفيديوهات والريلز من فيسبوك",
+  tts:    "تحويل النص إلى صوت بأصوات Gemini المتعددة",
+  novel:  "قراءة فصول الروايات الإنجليزية مترجمة للعربية",
 };
 
 module.exports = {
   config: {
-    name: "help",
-    description: "عرض جميع الأوامر أو معلومات عن أمر محدد",
-    usage: "help أو help <أمر> أو help all",
-    aliases: ["مساعدة", "الاوامر"],    category: "أدوات",
-    role: 0,
-    countDown: 3
+    name:        "help",
+    aliases:     ["مساعدة", "الاوامر"],
+    version:     "5.0",
+    role:        0,
+    countDown:   3,
+    category:    "أدوات",
+    description: "عرض قائمة جميع الأوامر مصنفة، أو تفاصيل أمر محدد",
+    guide: { en: "{pn} — قائمة الأوامر\n{pn} <اسم_الأمر> — تفاصيل أمر\n{pn} all — القائمة البسيطة" }
   },
 
   onStart: async ({ api, event, args }) => {
     const { threadID, messageID } = event;
     const commandsDir = path.join(__dirname);
 
-    if (!fs.existsSync(commandsDir)) {
+    if (!fs.existsSync(commandsDir))
       return api.sendMessage("❌ مجلد الأوامر غير موجود", threadID, null, messageID);
-    }
 
-    // 1️⃣ قراءة جميع الأوامر ديناميكياً
+    // ── تحميل الأوامر ──────────────────────────────────────────
     const commandFiles = fs.readdirSync(commandsDir).filter(f => f.endsWith(".js"));
     const loadedCommands = new Map();
 
     for (const file of commandFiles) {
       try {
-        const cmd = require(path.join(commandsDir, file));
-        const command = cmd.default || cmd;
-        if (command.config?.name && (command.onStart || command.run || command.execute)) {
-          const name = command.config.name.toLowerCase();
-          // تجنب التكرار (نفس الأمر قد يظهر بأسماء مستعارة)
-          if (!loadedCommands.has(name)) {
-            loadedCommands.set(name, {
-              name,
-              category: command.config.category || "غير مصنف",
-              description: command.config.shortDescription?.ar
-                || command.config.description
-                || "لا يوجد وصف",
-              aliases: command.config.aliases || []
-            });
-          }
-        }
-      } catch (e) {
-        // تجاهل الأخطاء في تحميل ملف واحد
-      }
+        const mod = require(path.join(commandsDir, file));
+        const cmd = mod.default || mod;
+        if (!cmd.config?.name) continue;
+        if (!(cmd.onStart || cmd.onChat || cmd.run || cmd.execute)) continue;
+
+        const name = cmd.config.name.toLowerCase();
+        if (loadedCommands.has(name)) continue;
+
+        loadedCommands.set(name, {
+          name,
+          category:    cmd.config.category || "غير مصنف",
+          description: cmd.config.shortDescription?.ar
+                    || cmd.config.description
+                    || FALLBACK_DESC[name]
+                    || "لا يوجد وصف",
+          aliases:     cmd.config.aliases || [],
+          role:        cmd.config.role    ?? 0,
+          countDown:   cmd.config.countDown || cmd.config.cooldown || 3,
+        });
+      } catch (_) {}
     }
 
-    // 2️⃣ إذا طلب المستخدم تفاصيل أمر محدد
+    // ── تفاصيل أمر محدد ────────────────────────────────────────
     if (args.length > 0 && args[0].toLowerCase() !== "all") {
       const cmdName = args[0].toLowerCase();
       const cmd = loadedCommands.get(cmdName);
-      if (cmd) {
-        const info =
-          `📌 ${cmd.name}\n` +
-          `📂 التصنيف: ${cmd.category}\n` +
-          `📝 الوصف: ${cmd.description}\n` +
-          (cmd.aliases.length > 0 ? `🔗 البدائل: ${cmd.aliases.join(", ")}\n` : "") +          `️ الكولداون: ${cmd.config?.countDown || cmd.config?.cooldown || 3} ثانية\n` +
-          `🔐 الصلاحية: ${getRoleName(cmd.config?.role || 0)}`;
-        return api.sendMessage(info, threadID, null, messageID);
-      }
-      return api.sendMessage(`❌ الأمر "${cmdName}" غير موجود`, threadID, null, messageID);
+      if (!cmd) return api.sendMessage(`❌ الأمر "${cmdName}" غير موجود`, threadID, null, messageID);
+
+      const info =
+        `📌 الأمر: .${cmd.name}\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `📂 التصنيف : ${cmd.category}\n` +
+        `📝 الوصف   : ${cmd.description}\n` +
+        (cmd.aliases.length ? `🔗 البدائل  : ${cmd.aliases.join(" | ")}\n` : "") +
+        `⏱ كولداون  : ${cmd.countDown} ثانية\n` +
+        `🔐 الصلاحية: ${getRoleName(cmd.role)}`;
+
+      return api.sendMessage(info, threadID, null, messageID);
     }
 
-    // 3️⃣ عرض جميع الأوامر كقائمة بسيطة
+    // ── قائمة بسيطة (all) ──────────────────────────────────────
     if (args[0]?.toLowerCase() === "all") {
-      let allCommands = ` جميع الأوامر (${loadedCommands.size} أمر):\n\n`;
-      let idx = 1;
-      for (const cmd of loadedCommands.values()) {
-        allCommands += `${idx}. ${cmd.name}\n`;
-        idx++;
-      }
-      return api.sendMessage(allCommands, threadID, null, messageID);
+      const names = [...loadedCommands.keys()].sort();
+      let msg = `📋 جميع الأوامر (${names.length}):\n━━━━━━━━━━━━━━━━━━━━\n`;
+      names.forEach((n, i) => { msg += `${i + 1}. .${n}\n`; });
+      return api.sendMessage(msg, threadID, null, messageID);
     }
 
-    // 4️ بناء الرسالة الرئيسية بالتنسيق المطلوب
-    const totalCommands = loadedCommands.size;
+    // ── القائمة الرئيسية المصنفة ───────────────────────────────
+    const total = loadedCommands.size;
+    const LINE  = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
+
     let message =
-      `~×~×~×~×~×~×~×~×~×~×~×~×~×~×~×~\n` +
-      `  ★ لوحة التحكم والأوامر (${totalCommands} أمر) ★\n` +
-      `~×~×~×~×~×~×~×~×~×~×~×~×~×~×~×~`;
+      `${LINE}\n` +
+      `   قائمة الأوامر  (${total} أمر)\n` +
+      `${LINE}`;
 
     const usedCommands = new Set();
     const otherCommands = [];
 
-    // المرور على كل تصنيف موحد
-    for (const [categoryTitle, categoryItems] of Object.entries(CATEGORY_MERGE)) {
-      // جمع الأوامر الموجودة فعلياً في هذا التصنيف
+    for (const [sectionTitle, items] of Object.entries(CATEGORY_MERGE)) {
       const present = [];
-      for (const item of categoryItems) {
-        const lowerItem = item.toLowerCase();
-        // قد يكون العنصر اسم أمر أو اسم تصنيف
-        if (loadedCommands.has(lowerItem)) {
-          present.push(loadedCommands.get(lowerItem));
+
+      for (const item of items) {
+        const key = item.toLowerCase();
+        if (loadedCommands.has(key)) {
+          const cmd = loadedCommands.get(key);
+          if (!usedCommands.has(cmd.name)) present.push(cmd);
         } else {
-          // ابحث عن الأوامر التي تصنيفها يطابق هذا العنصر
           for (const cmd of loadedCommands.values()) {
-            if (cmd.category.toLowerCase() === lowerItem && !usedCommands.has(cmd.name)) {
+            if (cmd.category.toLowerCase() === key && !usedCommands.has(cmd.name)) {
               present.push(cmd);
             }
           }
         }
       }
 
-      if (present.length === 0) continue;
+      if (!present.length) continue;
 
-      message += `\n\n ${categoryTitle}\n______\n`;      for (const cmd of present) {
+      message += `\n\n  ${sectionTitle}\n${LINE}\n`;
+      for (const cmd of present) {
         if (usedCommands.has(cmd.name)) continue;
-        const aliasHint = ALIAS_HINTS[cmd.name]
-          ? ` (أو ${ALIAS_HINTS[cmd.name]})`
-          : "";
-        message += ` • ${cmd.name}${aliasHint} ───★ ${cmd.description}.\n`;
+        message += ` .${cmd.name} — ${cmd.description}\n`;
         usedCommands.add(cmd.name);
       }
     }
 
-    // أي أمر لم يُدرَج في التصنيفات الموحدة ➜ قسم "أوامر أخرى"
+    // أوامر لم تُدرج في أي تصنيف
     for (const cmd of loadedCommands.values()) {
-      if (!usedCommands.has(cmd.name)) {
-        otherCommands.push(cmd);
-      }
+      if (!usedCommands.has(cmd.name)) otherCommands.push(cmd);
     }
 
-    if (otherCommands.length > 0) {
-      message += `\n\n أوامر أخرى\n______\n`;
+    if (otherCommands.length) {
+      message += `\n\n  أوامر أخرى\n${LINE}\n`;
       for (const cmd of otherCommands) {
-        const aliasHint = ALIAS_HINTS[cmd.name]
-          ? ` (أو ${ALIAS_HINTS[cmd.name]})`
-          : "";
-        message += ` • ${cmd.name}${aliasHint} ───★ ${cmd.description}.\n`;
+        message += ` .${cmd.name} — ${cmd.description}\n`;
       }
     }
 
-    message += `\n~×~×~×~×~×~×~×~×~×~×~×~×~×~×~×~\n`;
-    message += `  اكتب: help <اسم_الأمر> لعرض تفاصيله\n`;
-    message += ` 💡 اكتب: help all لعرض القائمة البسيطة`;
+    message +=
+      `\n${LINE}\n` +
+      `  help <أمر>  ←  تفاصيل الأمر\n` +
+      `  help all   ←  القائمة البسيطة\n` +
+      `${LINE}`;
 
     return api.sendMessage(message, threadID, null, messageID);
   }
@@ -172,11 +172,11 @@ module.exports = {
 
 function getRoleName(role) {
   const roles = {
-    0: "الجميع 👥",
-    1: "المشرفون 🛡️",
-    2: "المراقبون ️",
-    3: "الأعضاء المميزون 👑",
-    4: "المطورون 🔧"
+    0: "الجميع",
+    1: "المشرفون",
+    2: "المراقبون",
+    3: "المميزون",
+    4: "المطورون"
   };
   return roles[role] || "غير محدد";
 }
