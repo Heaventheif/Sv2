@@ -132,12 +132,13 @@ async function cleanTemp(p) {
 
 module.exports = {
   config: {
-    name:      "sc2",
-    aliases:   ["بريفيو2"],
-    version:   "3.3",
-    role:      0,
-    countDown: 10,
-    category:  "media",
+    name:        "sc2",
+    aliases:     ["بريفيو2"],
+    version:     "3.3",
+    role:        0,
+    countDown:   10,
+    category:    "media",
+    description: "تحميل مقطع Preview من SoundCloud عبر مكتبة play-dl — بديل احتياطي لأمر sc",
     guide: { en: "{pn} <اسم الأغنية>  —  مقطع preview من SoundCloud عبر play-dl" }
   },
 

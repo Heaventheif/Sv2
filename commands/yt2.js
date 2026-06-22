@@ -178,12 +178,13 @@ async function downloadAndSend(message, statusMsgId, query, wantMp4, api, thread
 // ═══════════════════════════════════════════════════════════════
 module.exports = {
   config: {
-    name:      "yt2",
-    aliases:   ["يوتيوب2"],
-    version:   "4.0",
-    role:      0,
-    countDown: 15,
-    category:  "download",
+    name:        "yt2",
+    aliases:     ["يوتيوب2"],
+    version:     "4.0",
+    role:        0,
+    countDown:   15,
+    category:    "download",
+    description: "تحميل من يوتيوب عبر yt-dlp-stream — بديل احتياطي لأمر yt — بحث بالاسم أو تحميل برابط",
     guide: { en:
       "{pn} <اسم>         — بحث وعرض قائمة\n" +
       "{pn} mp4 <اسم>     — بحث وعرض قائمة (فيديو)\n" +

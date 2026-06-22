@@ -173,12 +173,13 @@ async function cleanTemp(p) {
 
 module.exports = {
   config: {
-    name:      "sc",
-    aliases:   ["بريفيو", "مقطع"],  // ← "مقطع" هنا فقط، أُزيل من sc2
-    version:   "4.1",
-    role:      0,
-    countDown: 10,
-    category:  "media",
+    name:        "sc",
+    aliases:     ["بريفيو", "مقطع"],
+    version:     "4.1",
+    role:        0,
+    countDown:   10,
+    category:    "media",
+    description: "تشغيل مقطع Preview (30 ثانية) من SoundCloud — بحث مباشر بالاسم دون تسجيل",
     guide: { en: "{pn} <اسم الأغنية>  —  مقطع Preview من SoundCloud" },
   },
 

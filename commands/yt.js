@@ -228,12 +228,13 @@ function buildListText(results) {
 // ═══════════════════════════════════════════════════════════════
 module.exports = {
   config: {
-    name:      "yt",
-    aliases:   ["ytdl", "youtube", "mp3", "mp4", "يوتيوب"],
-    version:   "5.0",
-    role:      0,
-    countDown: 15,
-    category:  "download",
+    name:        "yt",
+    aliases:     ["يوتيوب"],
+    version:     "5.0",
+    role:        0,
+    countDown:   15,
+    category:    "download",
+    description: "تحميل الصوت والفيديو من يوتيوب — بحث بالاسم أو تحميل مباشر برابط (MP3 128kbps | MP4 360p)",
     guide: { en:
       "{pn} <اسم>        — بحث + قائمة 10 نتائج\n" +
       "{pn} mp4 <اسم>    — بحث + قائمة (فيديو)\n" +

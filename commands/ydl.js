@@ -92,12 +92,13 @@ async function searchYT(query, limit = 7) {
 // ═══════════════════════════════════════════════════════════════
 module.exports = {
   config: {
-    name:      "ydl",
-    aliases:   ["ytdl", "youtube", "mp3", "mp4", "yt"],
-    version:   "1.0",
-    role:      0,
-    countDown: 15,
-    category:  "download",
+    name:        "ydl",
+    aliases:     ["ytdl2"],
+    version:     "1.0",
+    role:        0,
+    countDown:   15,
+    category:    "download",
+    description: "تحميل من يوتيوب عبر API خارجي (ccproject) — بديل احتياطي لأمر yt — يدعم MP3 وMP4",
     guide: { en:
       "{pn} <اسم>        — بحث وعرض قائمة\n" +
       "{pn} mp4 <اسم>    — بحث (فيديو)\n" +

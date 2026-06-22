@@ -37,7 +37,7 @@ module.exports = {
         author: "SunkenBot Developer",
         countDown: 5,
         role: 0,
-        description: "البحث والتحميل من SoundCloud",
+        description: "بحث وتحميل أغاني كاملة من SoundCloud عبر API ferdev — يعرض قائمة نتائج للاختيار منها",
         category: "media",
         guides: "sing [اسم الأغنية]"
     },
