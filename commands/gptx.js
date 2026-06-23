@@ -1,79 +1,99 @@
-"use strict";
-/**
- * commands/gptx.js  —  GPT-4o via GitHub Models
- * ──────────────────────────────────────────────────
- * BUG FIXED: الجلسات كانت في cache/ (نظام ملفات مؤقت يُمسح على Render) →
- *            نُقلت إلى MongoDB عبر utils/aiSession.js
- * REFACTORED: حُذف loadSession/saveSession/clearSession/downloadImageAsBase64 (~50 سطراً)
- */
-
 const OpenAI = require("openai").OpenAI;
-const { loadSession, saveSession, clearSession } = require("../utils/aiSession");
-const { downloadImageAsBase64, getSenderName }   = require("../utils/mediaUtils");
+const fs = require('fs-extra');
+const path = require('path');
+const axios = require('axios');
 
-const token  = process.env.GITHUB_MODELS_TOKEN;
+const token = process.env.GITHUB_MODELS_TOKEN;
 const openai = new OpenAI({ baseURL: "https://models.inference.ai.azure.com", apiKey: token });
 
-const NS       = "gptx";
-const MAX_MSGS = 20;
+// ✅ الجلسات الجماعية تُخزَّن بـ threadID
+const sessionsDir = path.join(__dirname, '..', 'cache', 'ai_sessions_gptx');
+fs.ensureDirSync(sessionsDir);
 
-const SYSTEM = `أنت مساعد ذكي اسمك "Sunken". أجب بإيجاز باللغة العربية (أقل من 150 كلمة). كن ودوداً ومهذباً.`;
+const SYSTEM_PROMPT = `أنت مساعد ذكي اسمك "Sunken". أجب بإيجاز باللغة العربية (أقل من 150 كلمة). كن ودوداً ومهذباً.`;
 
-// ─── Reaction Helper ─────────────────────────────────────────
-function setReaction(api, reaction, messageID, threadID) {
+const setReaction = (api, reaction, messageID, threadID) => {
   try {
     if (!reaction || !messageID || !threadID) return;
+    if (String(messageID) === "undefined" || String(threadID) === "undefined") return;
     api.setMessageReaction({ reaction: String(reaction), messageID: String(messageID), threadID: String(threadID) }, () => {});
-  } catch (_) {}
+  } catch (e) {}
+};
+
+// ✅ مفتاح الجلسة = threadID (مشترك للكل في المجموعة)
+async function loadSession(threadID) {
+  const sessionFile = path.join(sessionsDir, `thread_${threadID}.json`);
+  try {
+    if (await fs.pathExists(sessionFile)) {
+      let ctx = await fs.readJson(sessionFile);
+      if (ctx.length > 20) ctx = ctx.slice(-20);
+      return ctx;
+    }
+  } catch (e) {}
+  return [];
+}
+
+async function saveSession(threadID, context) {
+  const sessionFile = path.join(sessionsDir, `thread_${threadID}.json`);
+  await fs.writeJson(sessionFile, context, { spaces: 0 }).catch(() => {});
+}
+
+async function clearSession(threadID) {
+  const sessionFile = path.join(sessionsDir, `thread_${threadID}.json`);
+  if (await fs.pathExists(sessionFile)) await fs.unlink(sessionFile);
+}
+
+async function downloadImageAsBase64(url) {
+  try {
+    const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const contentType = response.headers['content-type'] || 'image/jpeg';
+    const base64 = Buffer.from(response.data).toString('base64');
+    return { base64, contentType };
+  } catch (e) { return null; }
 }
 
 async function callGPT(context, prompt, imageData = null) {
-  const userContent = imageData
-    ? [
-        { type: "image_url", image_url: { url: `data:${imageData.mediaType};base64,${imageData.data}` } },
-        { type: "text", text: prompt || "ما هذه الصورة؟ صفها بالتفصيل." },
-      ]
-    : prompt;
+  let userContent = imageData ? [
+    { type: "image_url", image_url: { url: `data:${imageData.contentType};base64,${imageData.base64}` } },
+    { type: "text", text: prompt || "ما هذه الصورة؟ صفها بالتفصيل." }
+  ] : prompt;
 
-  const response = await openai.chat.completions.create({
-    model:       "gpt-4o",
-    temperature: 0.7,
-    max_tokens:  2048,
-    messages: [
-      { role: "system", content: SYSTEM },
-      ...context.map(m => ({ role: m.role, content: m.content })),
-      { role: "user", content: userContent },
-    ],
-  });
-
-  const reply = response?.choices?.[0]?.message?.content;
-  if (!reply) throw new Error("لا توجد استجابة من GPT");
-  return reply;
+  const messages = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...context.map(m => ({ role: m.role, content: m.content })),
+    { role: "user", content: userContent }
+  ];
+  const response = await openai.chat.completions.create({ messages, model: "gpt-4o", temperature: 0.7, max_tokens: 2048 });
+  if (!response?.choices?.length) throw new Error("لا توجد استجابة من GPT");
+  return response.choices[0].message.content;
 }
 
 async function handleMessage(api, event, message, prompt) {
+  // ✅ الجلسة الجماعية: نستخدم threadID
   const { threadID, messageID, senderID } = event;
 
-  // ─── مسح الذاكرة ────────────────────────────────────────────
-  if (["clear", "مسح"].includes(prompt.trim().toLowerCase())) {
-    await clearSession(NS, threadID);
+  if (prompt.trim().toLowerCase() === "clear" || prompt.trim() === "مسح") {
+    await clearSession(threadID);
     return message.reply("🧹 تم مسح ذاكرة المجموعة.");
   }
 
-  // ─── الجلسة + اسم مرسل (بالتوازي) ──────────────────────────
-  const [{ messages: context }, senderName] = await Promise.all([
-    loadSession(NS, threadID, MAX_MSGS),
-    getSenderName(api, senderID),
-  ]);
+  // ✅ جلب اسم المرسل لإضافته للسياق
+  let senderName = senderID;
+  try {
+    const userInfo = await new Promise((res, rej) =>
+      api.getUserInfo(senderID, (err, data) => err ? rej(err) : res(data))
+    );
+    senderName = userInfo?.[senderID]?.name || senderID;
+  } catch (_) {}
 
-  // ─── كشف الصور ───────────────────────────────────────────────
   let imageData = null;
-  const allAtts = [...(event.messageReply?.attachments || []), ...(event.attachments || [])];
-  for (const att of allAtts) {
+  const replyAtts = event.messageReply?.attachments || [];
+  const directAtts = event.attachments || [];
+  for (const att of [...replyAtts, ...directAtts]) {
     if (["photo", "sticker", "animated_image"].includes(att.type)) {
       const imgUrl = att.url || att.largePreviewUrl || att.previewUrl || att.thumbnailUrl;
       if (imgUrl) {
-        imageData = await downloadImageAsBase64(imgUrl).catch(() => null);
+        imageData = await downloadImageAsBase64(imgUrl);
         if (imageData) break;
       }
     }
@@ -82,62 +102,58 @@ async function handleMessage(api, event, message, prompt) {
   if (!prompt && !imageData) return message.reply("⚠️ اكتب سؤالاً أو ردّ على صورة.");
 
   setReaction(api, "⏳", messageID, threadID);
+  const context = await loadSession(threadID);
 
+  // ✅ نضيف اسم المرسل للرسالة
   const userText = imageData
     ? `[${senderName}]: [صورة] ${prompt || ""}`.trim()
     : `[${senderName}]: ${prompt}`;
 
-  let reply;
+  let reply = null;
   try {
     reply = await callGPT(context, imageData ? (userText || " ") : userText, imageData);
   } catch (error) {
+    console.error("[GPTx Error]:", error.message);
     let errorMsg = "❌ خطأ:\n";
-    if (error.status === 401)      errorMsg += "🔑 المفتاح غير صالح.";
+    if (error.status === 401) errorMsg += "🔑 المفتاح غير صالح.";
     else if (error.status === 404) errorMsg += "🤖 النموذج غير متاح.";
     else if (error.status === 429) errorMsg += "⏱️ تم تجاوز الحد اليومي.";
-    else errorMsg += (error.message || "خطأ غير معروف").substring(0, 100);
+    else errorMsg += error.message || "خطأ غير معروف";
     setReaction(api, "❌", messageID, threadID);
     return message.reply(errorMsg);
   }
 
-  if (!reply) {
-    setReaction(api, "❌", messageID, threadID);
-    return message.reply("❌ استجابة فارغة.");
-  }
+  if (!reply) { setReaction(api, "❌", messageID, threadID); return message.reply("❌ استجابة فارغة."); }
 
   setReaction(api, "🟢", messageID, threadID);
   const info = await message.reply(reply);
-  if (info?.messageID) message.registerReply(info.messageID, { threadID }, module.exports.onReply);
+  message.registerReply(info.messageID, { threadID }, module.exports.onReply);
 
-  await saveSession(NS, threadID, [
-    ...context,
-    { role: "user",      content: userText },
-    { role: "assistant", content: reply },
-  ], null, MAX_MSGS);
+  context.push({ role: "user",      content: userText });
+  context.push({ role: "assistant", content: reply });
+  await saveSession(threadID, context);
 }
 
 module.exports = {
   config: {
-    name:             "gptx",
-    version:          "2.1.0",
-    author:           "Sunken",
-    countDown:        3,
-    role:             0,
-    usePrefix:        false,
+    name: "gptx",
+    version: "2.0.0",
+    author: "Sunken",
+    countDown: 3,
+    role: 0,
+    usePrefix: false,
     shortDescription: { ar: "GPT-4o | ذاكرة جماعية | ردود تلقائية | يفهم الصور" },
-    category:         "ذكاء اصطناعي",
-    guide:            { ar: "gptx [سؤالك]\ngptx مسح — مسح ذاكرة المجموعة" },
+    category: "ذكاء اصطناعي",
+    guide: { ar: "gptx [سؤالك] ← بدء محادثة\nردّ على رسالة البوت ← يكمل تلقائياً\nردّ على صورة ← يحللها\ngptx مسح ← مسح ذاكرة المجموعة" }
   },
-
   onStart: async ({ api, event, args, message }) => {
     let prompt = args.join(" ").trim();
     if (!prompt && event.messageReply) prompt = event.messageReply.body || "";
     await handleMessage(api, event, message, prompt);
   },
-
-  onReply: async ({ api, event, message }) => {
+  onReply: async ({ api, event, message, Reply }) => {
     const prompt = event.body?.trim() || "";
-    if (!prompt && !event.attachments?.length) return;
+    if (!prompt && !(event.attachments?.length)) return;
     await handleMessage(api, event, message, prompt);
-  },
+  }
 };
