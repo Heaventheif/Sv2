@@ -10,7 +10,7 @@
     },
     "mqtt": {
         "enabled": true,
-        "reconnectInterval": 3600
+        "reconnectInterval": 8
     },
     "autoLogin": true,
     "apiServer": "https://minhdong.site",
@@ -21,8 +21,8 @@
         "twofactor": ""
     },
     "antiGetInfo": {
-        "AntiGetThreadInfo": false,
-        "AntiGetUserInfo": false
+        "AntiGetThreadInfo": true,
+        "AntiGetUserInfo": true
     },
     "remoteControl": {
         "enabled": false,
