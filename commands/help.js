@@ -10,7 +10,7 @@ const CATEGORY_MERGE = {
   ],
   "الوسائط والتحميل": [
     "media", "وسائط", "download", "تحميل",
-    "yt", "ydl", "yt2", "sc", "sc2", "sing", "fb",
+    "yt", "ydl", "yt2", "sc", "sc2", "sing",
     "img", "tts", "pinterest", "random"
   ],
   "الألعاب والترفيه": [
@@ -35,6 +35,18 @@ const FALLBACK_DESC = {
   tts:    "تحويل النص إلى صوت بأصوات Gemini المتعددة",
   novel:  "قراءة فصول الروايات الإنجليزية مترجمة للعربية",
 };
+
+// ═══════════════════════════════════════════════════════════════
+// أوامر مخفية لا تظهر في قائمة help
+// ─────────────────────────────────────────────────────────────
+// ✦ الطريقة 1: أضف اسم الأمر هنا مباشرة (الاسم وليس الـ alias)
+//    مثال: HIDDEN_COMMANDS = ["fb", "tts", "novel"]
+//
+// ✦ الطريقة 2: من داخل ملف الأمر نفسه، أضف في config:
+//    config: { name: "fb", ..., hidden: true }
+//    (الطريقتان تعملان معًا — يكفي توفر إحداهما لإخفاء الأمر)
+// ═══════════════════════════════════════════════════════════════
+const HIDDEN_COMMANDS = ["fb"];
 
 module.exports = {
   config: {
@@ -68,6 +80,10 @@ module.exports = {
 
         const name = cmd.config.name.toLowerCase();
         if (loadedCommands.has(name)) continue;
+
+        // ── تجاهل الأوامر المخفية (من القائمة أو من config الأمر نفسه) ──
+        const isHiddenByConfig = cmd.config.hidden === true || cmd.config.isHidden === true;
+        if (HIDDEN_COMMANDS.includes(name) || isHiddenByConfig) continue;
 
         loadedCommands.set(name, {
           name,

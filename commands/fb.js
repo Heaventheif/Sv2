@@ -32,15 +32,7 @@ async function callHF(fbUrl, quality = "worst") {
 
 // ─── تحميل وإرسال ────────────────────────────────────────────
 async function downloadAndSend(api, event, fbUrl, quality = "worst", label = "") {
-  const { threadID, messageID } = event;
-
-  const waitInfo = await new Promise(res =>
-    api.sendMessage("⏳ جارٍ تحميل الفيديو...", threadID, (e, i) => res(i), messageID)
-  );
-  const unsendWait = () => {
-    if (waitInfo?.messageID)
-      try { api.unsendMessage(waitInfo.messageID, () => {}); } catch (_) {}
-  };
+  const { threadID } = event;
 
   const tmpFile = path.join(os.tmpdir(), `fb_${Date.now()}.mp4`);
 
@@ -51,7 +43,6 @@ async function downloadAndSend(api, event, fbUrl, quality = "worst", label = "")
       // ─── HF حمّل الفيديو وأرجعه base64 ─────────────────
       const buffer = Buffer.from(result.video_b64, "base64");
       await fs.writeFile(tmpFile, buffer);
-      unsendWait();
 
       await new Promise((res, rej) =>
         api.sendMessage(
@@ -62,25 +53,18 @@ async function downloadAndSend(api, event, fbUrl, quality = "worst", label = "")
 
     } else if (result.video_url) {
       // ─── HF أرجع رابط مباشر (نادر) ──────────────────────
-      unsendWait();
       await api.sendMessage(
         `🎬 ${result.title || "فيديو فيسبوك"}\n🔗 ${result.video_url}`,
-        threadID, null, messageID
+        threadID, null, null
       );
 
     } else {
-      unsendWait();
-      api.sendMessage("❌ لم يُعثر على الفيديو.", threadID, null, messageID);
+      console.error("[FB→HF] لم يُعثر على الفيديو:", fbUrl);
     }
 
   } catch (e) {
-    unsendWait();
-    console.error("[FB→HF]", e.response?.status, e.message?.substring(0, 80));
-    const msg =
-      e.message.includes("25MB")      ? "❌ الفيديو أكبر من 25MB." :
-      e.message.includes("لم يُعثر") ? "❌ لم يُعثر على الفيديو — تأكد من الرابط." :
-                                         `❌ ${e.message.substring(0, 100)}`;
-    api.sendMessage(msg, threadID, null, messageID);
+    // فشل صامت بالكامل — لا تُرسل أي رسالة في الشات، فقط سجل في الـ console
+    console.error("[FB→HF]", e.response?.status, e.message?.substring(0, 200));
   } finally {
     fs.remove(tmpFile).catch(() => {});
   }
