@@ -46,7 +46,7 @@ const FALLBACK_DESC = {
 //    config: { name: "fb", ..., hidden: true }
 //    (الطريقتان تعملان معًا — يكفي توفر إحداهما لإخفاء الأمر)
 // ═══════════════════════════════════════════════════════════════
-const HIDDEN_COMMANDS = ["fb"];
+const HIDDEN_COMMANDS = ["fb","up","profile","help"];
 
 module.exports = {
   config: {
